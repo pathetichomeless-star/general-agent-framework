@@ -235,4 +235,4 @@ For evaluation, licensing, source-access or commercial-use discussions:
 
 Suggested email subject: **[COMMERCIAL] General Agent Framework**
 
-No public fixed pricing is published.
+For pricing and commercial access, please contact me by email or WeChat.
