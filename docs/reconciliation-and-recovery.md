@@ -15,6 +15,11 @@ happened.
 
 > **UNKNOWN is not FAILED.**
 
+![Reconciliation and recovery — separate command truth and external verdict](../assets/visuals/framework-reconciliation.png)
+
+*COMMAND TRUTH remains UNKNOWN after a lost response. MATCHED (derived) reflects external-state
+evidence; it is not completion and never changes UNKNOWN into SUCCESS.*
+
 If you assume an unknown outcome means "it failed" and send the request again, you can apply the
 change twice — one refund becomes two. If you assume it means "it succeeded" and do nothing, you
 may be wrong in the other direction. Both assumptions are guesses.
@@ -36,7 +41,7 @@ current state of the external object through the governed read path and derives 
 | Verdict | Meaning |
 |---|---|
 | `unobserved` | We have not looked yet. |
-| `matched` | A fresh, usable observation agrees with what we intended to write. |
+| `matched` (derived) | A fresh, usable observation agrees with what we intended to write; this is not completion. |
 | `diverged` | A fresh, usable observation disagrees. A human should look. |
 | `unobservable` | We have evidence, but none of it is fresh and usable. |
 
@@ -44,7 +49,7 @@ current state of the external object through the governed read path and derives 
 the other. A stale observation can never be counted as a match.
 
 > The framework's vocabulary has these four verdicts. **The public demo exercises two of them** —
-> `unobservable`, then `matched`. The other two are part of the vocabulary but are not demonstrated.
+> `unobservable`, then `matched` (derived). The other two are part of the vocabulary but are not demonstrated.
 
 Reconciliation is *derived* from the recorded command plus its observations. It is not a second
 source of truth and it does not rewrite history.
@@ -69,7 +74,7 @@ At the end of the public demo, the framework reports two separate things, and it
 
 ```text
 command truth                            = unknown     (we never got a confirmation)
-external truth (reconciliation verdict)  = matched     (external state agrees)
+external truth (reconciliation verdict)  = matched     (derived) (external state agrees)
 authoritative ledger                     = 1 x CNY 100.00
 ```
 

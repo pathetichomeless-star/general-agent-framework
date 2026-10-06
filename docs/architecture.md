@@ -21,7 +21,9 @@ Reconciliation & Recovery    <- did it happen? resolve the uncertainty from exte
 Evidence / Audit             <- what was decided, by whom, and on what basis
 ```
 
-![General Agent Framework — governed action flow](../assets/hero-banner.png)
+![General Agent Framework — conceptual governed-action lifecycle](../assets/visuals/framework-overview.png)
+
+*Conceptual framework overview — not an internal module map or a certification.*
 
 Each layer exists because the layer above it cannot solve that problem on its own:
 

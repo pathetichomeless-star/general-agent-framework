@@ -30,6 +30,19 @@ Once approval is given, exactly one attempt is made. The attempt is recorded **b
 external call, so a crash mid-flight leaves evidence of an intent that may or may not have
 succeeded — which is precisely the situation the next page is about.
 
+## Evidence and audit
+
+![Evidence and audit — approval-task hash-chain scope and retained records](../assets/visuals/framework-evidence-audit.png)
+
+*Hash-chain verification scope: approval-task evidence only.* Durable command records, execution
+attempts, external observations, reconciliation results and audited write-store steps are retained
+and auditable; they are not part of that same hash chain. The whole run is not presented as one
+tamper-evident chain.
+
+COMMAND TRUTH remains UNKNOWN in the public demo. MATCHED (derived) is an external-state verdict,
+not completion or command success. This conceptual record overview does not describe private
+implementation internals.
+
 ## What this page is not
 
 This page describes behaviour illustrated by the public demonstration. It is not a description of

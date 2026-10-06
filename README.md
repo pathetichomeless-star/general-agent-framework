@@ -12,6 +12,10 @@
 
 [See the real governed refund demo ↓](#real-verified-demo) · [Public vs commercial boundary](#public-vs-commercial-boundary)
 
+<img src="assets/visuals/framework-overview.png" width="100%" alt="General Agent Framework — conceptual governed-action lifecycle and public showcase boundary">
+
+*Conceptual framework overview — a framing of the problem space, not an internal module map or a certification.*
+
 ---
 
 ## Why this exists
@@ -80,7 +84,7 @@ The external system may have committed the write even when the caller never rece
 | **The response becomes UNKNOWN** | The write was applied, but the response was lost. The framework records that it does not know — it does not guess. |
 | **Blind retry is refused** | Re-sending is refused by the framework, so no second refund can be created. |
 | **Reconciliation checks authoritative external state** | The agent reads the external system through the governed read path. |
-| **External truth becomes MATCHED** | A fresh, usable reading agrees with what was intended. |
+| **External truth becomes MATCHED (derived)** | A fresh, usable reading agrees with what was intended; this verdict is not completion. |
 | **Command truth honestly remains UNKNOWN** | The framework never rewrites "did not get confirmation" into "succeeded". |
 | **Exactly one refund exists** | The authoritative ledger holds one CNY 100 refund — not two. |
 | **The evidence and audit trail are retained** | The decision path is recorded, and the approval task's tamper-evident evidence chain verifies. |
@@ -89,7 +93,7 @@ The external system may have committed the write even when the caller never rece
 
 ![External outcome unknown](assets/unknown-outcome.png)
 
-![Reconciliation matched](assets/reconciliation-matched.png)
+![Reconciliation matched (derived)](assets/reconciliation-matched.png)
 
 ![Audit trail](assets/audit-trail.png)
 
@@ -112,20 +116,15 @@ a `refund` object derived from an `order`. That mapping is a demo modelling choi
 
 Read the full expected output in [`demo/EXPECTED_FLOW.md`](demo/EXPECTED_FLOW.md).
 
-### The same run, from the business side
-
-<p><a href="assets/business-home-refund-operations.png"><img src="assets/business-home-refund-operations.png" width="320" alt="Governed Refund Operations — conceptual business application, example use case"></a></p>
-
-*Governed Refund Operations — an example use case and a conceptual business application, not an existing product. Click to enlarge.*
+The [governed refund business visual](docs/use-cases.md#customer-support--governed-refund-example)
+is grounded in this synthetic deterministic run; its application view is illustrative.
 
 ---
 
 ## Architecture overview
 
-![Conceptual governed-write lifecycle](assets/architecture-overview.png)
-
-The diagram above is a **conceptual governed-write lifecycle** — the concerns this demo
-illustrates, drawn end to end:
+The framework overview near the introduction shows a **conceptual governed-write lifecycle** —
+the concerns this demo illustrates, drawn end to end:
 
 ```text
 Agent / Application
@@ -154,28 +153,21 @@ Further reading: [Conceptual architecture](docs/architecture.md) ·
 
 ## Industry use cases
 
-Each card below is an **illustrative scenario** showing the shape of the problem this framework
-addresses. They are **not existing products**, and none of them is exercised by the demo.
+*Illustrative scenarios — not existing products, not exercised by this demo as business applications.*
+Blueberry export and procurement are synthetic scenarios. The governed refund visual is grounded
+in the [public deterministic refund demo](demo/README.md): synthetic data, simulated approval,
+no live business system. Click a thumbnail to view its full-size visual.
 
-| ![Customer Support](assets/use-case-customer-support.png) | ![IT Operations](assets/use-case-it-ops.png) | ![Compliance](assets/use-case-compliance.png) |
-|---|---|---|
-| **Customer Support**<br>*Example use case*<br>Human-approved refunds and sensitive account actions. | **IT Operations**<br>*Example use case*<br>Governed remediation, recovery and change execution. | **Compliance**<br>*Example use case*<br>Approval, evidence and auditable decision paths. |
-| ![Knowledge Operations](assets/use-case-knowledge.png) | ![Finance Operations](assets/use-case-finance.png) | ![Procurement](assets/use-case-procurement.png) |
-| **Knowledge Operations**<br>*Example use case*<br>Governed retrieval and traceable knowledge use. | **Finance Operations**<br>*Example use case*<br>Controlled writes into financial/business systems. | **Procurement**<br>*Example use case*<br>Approval-controlled supplier and purchasing actions. |
+<table>
+  <tr>
+    <td><a href="assets/visuals/scenario-blueberry-factory-export.png"><img src="assets/visuals/scenario-blueberry-factory-export-thumb.png" width="320" alt="Blueberry Factory — Export Operations; illustrative synthetic scenario"></a></td>
+    <td><a href="assets/visuals/scenario-governed-refund.png"><img src="assets/visuals/scenario-governed-refund-thumb.png" width="320" alt="Governed Refund Operations; public deterministic demo, synthetic data and simulated approval"></a></td>
+    <td><a href="assets/visuals/scenario-procurement-change.png"><img src="assets/visuals/scenario-procurement-change-thumb.png" width="320" alt="Procurement — Governed Purchase-Order Change; illustrative synthetic scenario"></a></td>
+  </tr>
+</table>
 
-Three of these scenarios, drawn as fuller business pages (click to enlarge):
-
-<p align="center">
-  <a href="assets/business-home-support-operations.png"><img src="assets/business-home-support-operations.png" width="300" alt="Support Handoffs with Governance — illustrative workflow"></a>
-  <a href="assets/business-home-finance-operations.png"><img src="assets/business-home-finance-operations.png" width="300" alt="Finance Actions Under Approval — example use case"></a>
-  <a href="assets/business-home-it-operations.png"><img src="assets/business-home-it-operations.png" width="300" alt="Operational Actions with Reconciliation — illustrative workflow"></a>
-</p>
-
-Left to right: Support Handoffs with Governance (*illustrative workflow*), Finance Actions Under
-Approval (*example use case*), and Operational Actions with Reconciliation (*illustrative
-workflow*). Each is a conceptual business application, not an existing product.
-
-Illustrative scenario — not an existing product, not exercised by this demo.
+COMMAND TRUTH remains UNKNOWN where the response is lost. MATCHED (derived) is an external-state
+verdict, not completion or command success. See [use cases and scenario boundaries](docs/use-cases.md).
 
 ### Who this is for
 
@@ -198,10 +190,11 @@ privately licensed.
 |---|---|
 | Product documentation (`docs/`) | Commercial framework implementation source |
 | Conceptual architecture overview | Full private test suite |
-| The public demo (`demo/`) | Validation harness |
-| Screenshots and visual assets | Machine and human certification evidence |
-| Controlled examples | Private release records |
-| | Customer-specific bundles |
+| The public demo (`demo/`) | Customer-specific bundles |
+| Screenshots and visual assets | Private licensing and delivery arrangements |
+| Controlled examples | |
+
+Further private material exists and is not described here.
 
 Access to the commercial framework is provided under a separate private licence. No fixed price
 is published here. See [`COMMERCIAL.md`](COMMERCIAL.md).

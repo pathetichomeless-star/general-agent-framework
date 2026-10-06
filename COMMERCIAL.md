@@ -15,10 +15,8 @@ is a separate commercial product, and its implementation is private.
 
 - the commercial framework implementation source
 - the full private test suite
-- the validation harness
-- machine or human certification evidence
-- private release records
 - customer-specific bundles
+- private licensing and delivery arrangements
 
 ## How commercial access works
 
