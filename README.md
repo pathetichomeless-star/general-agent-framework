@@ -1,16 +1,37 @@
-# General Agent Framework
+# General Agent Framework — Governed AI Actions for Real Business Systems
 
 **Build AI agents that can safely act on real business systems.**
 
+**Human approval. Durable execution. UNKNOWN-aware reconciliation. Auditable external actions.**
+
+A framework for governed AI agents that execute real business actions under explicit controls.
+
 > Here "safely" is a design goal, not a certification: it means *under explicit, operator-defined governance, approval, evidence, recovery and audit controls*. It is not a security, legal, regulatory or compliance certification, and no security response or remediation SLA is implied.
+> No universal exactly-once or third-party idempotency guarantee is implied.
+
+This **public showcase** contains documentation, a demo, screenshots/visuals and examples.
+The commercial Framework implementation remains **private and separately licensed**.
+This repository is proprietary, all rights reserved — see [LICENSE](LICENSE).
+
+[See the real governed refund demo ↓](#real-verified-demo) · [Expected demo flow](demo/EXPECTED_FLOW.md) · [Public vs commercial boundary](#public-vs-commercial-boundary)
+
+### Run the deterministic refund demo
+
+Requires **Python 3.10+** and a separately licensed Framework already importable by `python3`.
+See [demo setup](demo/README.md#running-the-demo) for the existing `GAF_FRAMEWORK_PATH` option.
+From this repository's root:
+
+```sh
+cd demo
+GAF_DEMO_MODE=auto python3 demo.py
+```
+
+Synthetic data, simulated approval, no live business system. Command truth remains **UNKNOWN**;
+reconciliation reports **MATCHED (derived)**, not command success.
 
 ![General Agent Framework — conceptual business homepage](assets/business-home-general.png)
 
 *Conceptual business application view — not an existing product. The "VERIFIED DEMO OUTPUT" band quotes the real deterministic run shipped in this repository.*
-
-**Governed actions** · **Human approval** · **Durable execution** · **Safe external writes** · **Reconciliation & recovery** · **Auditability** · **Extensibility**
-
-[See the real governed refund demo ↓](#real-verified-demo) · [Public vs commercial boundary](#public-vs-commercial-boundary)
 
 <img src="assets/visuals/framework-overview.png" width="100%" alt="General Agent Framework — conceptual governed-action lifecycle and public showcase boundary">
 
