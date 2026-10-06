@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+demo-run/
+.DS_Store
+.env*

@@ -1,0 +1,8 @@
+{
+  "order_id": "DEMO-ORDER-001",
+  "customer_id": "DEMO-CUSTOMER-043",
+  "status": "paid",
+  "currency": "CNY",
+  "total": "100.00",
+  "note": "Synthetic fixture for the public demo. Contains no real customer data."
+}

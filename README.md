@@ -1,0 +1,238 @@
+# General Agent Framework
+
+**Build AI agents that can safely act on real business systems.**
+
+> Here "safely" is a design goal, not a certification: it means *under explicit, operator-defined governance, approval, evidence, recovery and audit controls*. It is not a security, legal, regulatory or compliance certification, and no security response or remediation SLA is implied.
+
+![General Agent Framework — conceptual business homepage](assets/business-home-general.png)
+
+*Conceptual business application view — not an existing product. The "VERIFIED DEMO OUTPUT" band quotes the real deterministic run shipped in this repository.*
+
+**Governed actions** · **Human approval** · **Durable execution** · **Safe external writes** · **Reconciliation & recovery** · **Auditability** · **Extensibility**
+
+[See the real governed refund demo ↓](#real-verified-demo) · [Public vs commercial boundary](#public-vs-commercial-boundary)
+
+---
+
+## Why this exists
+
+Many agent frameworks make it easy to decide what to do. Very few make it safe to *do*
+something irreversible in a system you do not own.
+
+Connecting a model to a tool is a day of work. Making the resulting action survive contact with
+a real business system is not, because the failure modes are not the loud ones. They are these:
+
+| Failure mode | What actually goes wrong |
+|---|---|
+| **The action happens before anyone approves it** | An agent that is *usually right* becomes an agent that refunds, deletes or pays without a human in the loop — and the mistake is discovered afterwards. |
+| **The outcome is unknown** | The external system may have committed the write *after* the network dropped the response. The caller is left with no idea whether the side effect happened. Retrying can duplicate it. Not retrying can lose it. |
+| **Somebody retries anyway** | "It timed out, so it failed" is a reasonable assumption with an unreasonable consequence: a duplicated refund, a double charge, a repeated notification. |
+
+The General Agent Framework treats those as first-class problems rather than edge cases.
+
+---
+
+## Core capabilities
+
+The framework is built around the concerns this demo illustrates. In the order an action moves
+through them:
+
+- **Governed actions** — an action that changes an external system is expressed as a write
+  intent that must pass explicit checks before it can exist, not as a raw function call.
+- **Human approval** — approval is a structural precondition, not a setting. A write intent
+  with no approval binding cannot be constructed at all.
+- **Durable execution** — the intent to act is recorded durably before the external call is
+  made, so a crash leaves evidence rather than silence.
+- **Safe external writes** — idempotency keys are derived once and stay stable across retries;
+  an indeterminate outcome is never optimistically re-sent.
+- **Reconciliation & recovery** — uncertainty is resolved by reading authoritative external
+  state, not by guessing.
+- **Auditability** — the decision path is captured as evidence that can be replayed and checked.
+- **Extensibility** — the external connection is an adapter boundary, so the governance layer
+  does not have to know what system is on the other side.
+
+> These are the concerns the demo exercises — a framing of the problem space, not a published
+> module list or an official architecture taxonomy.
+
+---
+
+## Real, verified demo
+
+Everything below is captured from a **real, deterministic run** of a public demo that ships in
+this repository at [`demo/`](demo/README.md). Synthetic data only, no network, no credentials.
+
+### The failure mode this demo is built around
+
+The external system may have committed the write even when the caller never received a response.
+
+> **UNKNOWN ≠ FAILED.** Treating "I don't know" as "it failed" is exactly how one refund becomes two.
+
+![Demo overview](assets/terminal-demo-overview.png)
+
+![Animated walkthrough of the same real deterministic run](assets/demo-flow.gif)
+
+### What the demo demonstrates
+
+| Step | What you will see |
+|---|---|
+| **Pre-approval action is blocked** | The framework refuses to dispatch before approval. Nothing reaches the external system. |
+| **The approved write occurs exactly once** | One attempt, one recorded intent, one outbound call. |
+| **The response becomes UNKNOWN** | The write was applied, but the response was lost. The framework records that it does not know — it does not guess. |
+| **Blind retry is refused** | Re-sending is refused by the framework, so no second refund can be created. |
+| **Reconciliation checks authoritative external state** | The agent reads the external system through the governed read path. |
+| **External truth becomes MATCHED** | A fresh, usable reading agrees with what was intended. |
+| **Command truth honestly remains UNKNOWN** | The framework never rewrites "did not get confirmation" into "succeeded". |
+| **Exactly one refund exists** | The authoritative ledger holds one CNY 100 refund — not two. |
+| **The evidence and audit trail are retained** | The decision path is recorded, and the approval task's tamper-evident evidence chain verifies. |
+
+![Pre-approval write blocked](assets/approval-blocked.png)
+
+![External outcome unknown](assets/unknown-outcome.png)
+
+![Reconciliation matched](assets/reconciliation-matched.png)
+
+![Audit trail](assets/audit-trail.png)
+
+The demo ends on two axes, and they are deliberately never merged:
+
+```text
+command truth                                = unknown
+external truth (reconciliation verdict)      = matched   (derived)
+authoritative ledger                         = 1 x 100.00 CNY
+```
+
+The approval in this demo is a **DEMO HUMAN APPROVAL SIMULATION**. No real person approves a real
+transaction, and no business system is contacted. The demo also substitutes only the transport:
+every guarantee above the transport — authorization, approval binding, durable command and
+attempt records, result classification, retry and staleness rules, the read boundary and its
+freshness decision, and the reconciliation derivation — is the framework's own code path.
+
+The framework has no built-in "refund" semantic; refunds here are modelled as a governed write of
+a `refund` object derived from an `order`. That mapping is a demo modelling choice.
+
+Read the full expected output in [`demo/EXPECTED_FLOW.md`](demo/EXPECTED_FLOW.md).
+
+### The same run, from the business side
+
+<p><a href="assets/business-home-refund-operations.png"><img src="assets/business-home-refund-operations.png" width="320" alt="Governed Refund Operations — conceptual business application, example use case"></a></p>
+
+*Governed Refund Operations — an example use case and a conceptual business application, not an existing product. Click to enlarge.*
+
+---
+
+## Architecture overview
+
+![Conceptual governed-write lifecycle](assets/architecture-overview.png)
+
+The diagram above is a **conceptual governed-write lifecycle** — the concerns this demo
+illustrates, drawn end to end:
+
+```text
+Agent / Application
+        ↓
+Governance & Approval
+        ↓
+Durable Execution
+        ↓
+External Systems
+        ↓
+Reconciliation & Recovery
+        ↓
+Evidence / Audit
+```
+
+It is a framing of the problem space, not the framework's internal architecture and not a module
+list. The **commercial implementation is private and is not present in this repository**; this
+repository contains documentation, the public demo, and visual assets only.
+
+Further reading: [Conceptual architecture](docs/architecture.md) ·
+[Governed actions](docs/governed-actions.md) ·
+[Reconciliation and recovery](docs/reconciliation-and-recovery.md) ·
+[Use cases](docs/use-cases.md)
+
+---
+
+## Industry use cases
+
+Each card below is an **illustrative scenario** showing the shape of the problem this framework
+addresses. They are **not existing products**, and none of them is exercised by the demo.
+
+| ![Customer Support](assets/use-case-customer-support.png) | ![IT Operations](assets/use-case-it-ops.png) | ![Compliance](assets/use-case-compliance.png) |
+|---|---|---|
+| **Customer Support**<br>*Example use case*<br>Human-approved refunds and sensitive account actions. | **IT Operations**<br>*Example use case*<br>Governed remediation, recovery and change execution. | **Compliance**<br>*Example use case*<br>Approval, evidence and auditable decision paths. |
+| ![Knowledge Operations](assets/use-case-knowledge.png) | ![Finance Operations](assets/use-case-finance.png) | ![Procurement](assets/use-case-procurement.png) |
+| **Knowledge Operations**<br>*Example use case*<br>Governed retrieval and traceable knowledge use. | **Finance Operations**<br>*Example use case*<br>Controlled writes into financial/business systems. | **Procurement**<br>*Example use case*<br>Approval-controlled supplier and purchasing actions. |
+
+Three of these scenarios, drawn as fuller business pages (click to enlarge):
+
+<p align="center">
+  <a href="assets/business-home-support-operations.png"><img src="assets/business-home-support-operations.png" width="300" alt="Support Handoffs with Governance — illustrative workflow"></a>
+  <a href="assets/business-home-finance-operations.png"><img src="assets/business-home-finance-operations.png" width="300" alt="Finance Actions Under Approval — example use case"></a>
+  <a href="assets/business-home-it-operations.png"><img src="assets/business-home-it-operations.png" width="300" alt="Operational Actions with Reconciliation — illustrative workflow"></a>
+</p>
+
+Left to right: Support Handoffs with Governance (*illustrative workflow*), Finance Actions Under
+Approval (*example use case*), and Operational Actions with Reconciliation (*illustrative
+workflow*). Each is a conceptual business application, not an existing product.
+
+Illustrative scenario — not an existing product, not exercised by this demo.
+
+### Who this is for
+
+This is the intended audience — not a list of existing customers, deployments, or case studies:
+
+- AI agent and platform engineering teams
+- SaaS teams adding governed AI actions
+- enterprise IT and automation teams
+- AI startups
+- integration and consulting teams
+
+---
+
+## Public vs commercial boundary
+
+This repository is the **public showcase**. The commercial framework is separate, private, and
+privately licensed.
+
+| Public in this repository | Private, not in this repository |
+|---|---|
+| Product documentation (`docs/`) | Commercial framework implementation source |
+| Conceptual architecture overview | Full private test suite |
+| The public demo (`demo/`) | Validation harness |
+| Screenshots and visual assets | Machine and human certification evidence |
+| Controlled examples | Private release records |
+| | Customer-specific bundles |
+
+Access to the commercial framework is provided under a separate private licence. No fixed price
+is published here. See [`COMMERCIAL.md`](COMMERCIAL.md).
+
+---
+
+## Security
+
+Please **do not** report vulnerabilities through public GitHub issues.
+
+Security reports go to: **pathetichomeless@outlook.com**
+
+Use the subject prefix **[SECURITY]** followed by a short description — for example
+`[SECURITY] <short description>`. Commercial enquiries use the same mailbox with the subject
+prefix **[COMMERCIAL]**; the two are handled as separate categories. No response or remediation
+SLA is promised. Full details in [`SECURITY.md`](SECURITY.md).
+
+---
+
+## Commercial access
+
+This repository is **public to view and not open source**. Public availability grants no rights to
+the commercial framework. See [`LICENSE`](LICENSE) and [`COMMERCIAL.md`](COMMERCIAL.md).
+
+The commercial Framework is privately licensed and delivered.
+
+For evaluation, licensing, source-access or commercial-use discussions:
+
+- **Email:** pathetichomeless@outlook.com
+- **WeChat:** pathetichomeless
+
+Suggested email subject: **[COMMERCIAL] General Agent Framework**
+
+No public fixed pricing is published.
