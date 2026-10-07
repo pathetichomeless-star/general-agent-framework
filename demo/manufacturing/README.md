@@ -32,6 +32,10 @@ python3 demo/manufacturing/run_demo.py        # 默认 http://127.0.0.1:8765/
 
 销售用 AI 起草报价（8% 折扣自动送审批）→ 老板审批 → 订单确认 → AI 物料检查发现缺料 → 紧急采购审批 → 生产排产/领料/完工 → 仓库执行发货 → 承运商响应丢失，**命令真相诚实记录为 UNKNOWN** → 对账给出 **匹配（推导）** 的外部判定 → 老板/管理员在审计页回放全程并验证证据链。
 
+![Shipment reconciliation preserves UNKNOWN separately from MATCHED](../../assets/manufacturing-shipment-reconciliation.png)
+
+*Command truth remains UNKNOWN; reconciliation reports MATCHED (derived) independently. Synthetic public simulation; no live carrier is contacted.*
+
 完整分镜见 [EXPECTED_FLOW.md](EXPECTED_FLOW.md) 与 [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)。
 
 ## 两种模式 Two modes（绝不混淆 Never conflated）

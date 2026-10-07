@@ -27,6 +27,14 @@ runnable without private Framework source. Approval is a **DEMO HUMAN APPROVAL
 SIMULATION**; no real business system is contacted. This mode demonstrates business
 behavior and governance boundaries; it does not prove commercial Framework execution.
 
+![Manufacturing owner dashboard](assets/manufacturing-owner-dashboard.png)
+
+*Owner dashboard: pending approvals, overdue production and inventory risks. Chinese-first UI; synthetic data in public simulation mode.*
+
+![AI recommendation awaiting human approval](assets/manufacturing-ai-human-approval.png)
+
+*AI recommends purchasing 120 kg after detecting an 80 kg shortage; the owner can approve or reject. Demo human approval simulation.*
+
 Requires **Python 3.10+**, standard library only. From this repository's root:
 
 ```sh
