@@ -1,0 +1,4 @@
+# Demo runtime state and caches never belong in the repository.
+.state/
+__pycache__/
+*.pyc
