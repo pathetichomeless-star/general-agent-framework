@@ -9,11 +9,38 @@ A framework for governed AI agents that execute real business actions under expl
 > Here "safely" is a design goal, not a certification: it means *under explicit, operator-defined governance, approval, evidence, recovery and audit controls*. It is not a security, legal, regulatory or compliance certification, and no security response or remediation SLA is implied.
 > No universal exactly-once or third-party idempotency guarantee is implied.
 
-This **public showcase** contains documentation, a demo, screenshots/visuals and examples.
+This **public showcase** contains documentation, demos, screenshots/visuals and examples.
 The commercial Framework implementation remains **private and separately licensed**.
 This repository is proprietary, all rights reserved — see [LICENSE](LICENSE).
 
-[See the real governed refund demo ↓](#real-verified-demo) · [Expected demo flow](demo/EXPECTED_FLOW.md) · [Public vs commercial boundary](#public-vs-commercial-boundary)
+[Primary business demo ↓](#primary-business-demo--hongsheng-works--宏晟智造) · [Secondary technical demo ↓](#secondary-technical-demo--governed-refund--unknown--reconciliation) · [Public vs commercial boundary](#public-vs-commercial-boundary)
+
+## Primary business demo — Hongsheng Works / 宏晟智造
+
+**Governed Manufacturing Demo** — a realistic multi-role manufacturing application
+with a Chinese-first UI and an English switch. Owner / Factory Manager / Sales /
+Warehouse / Admin roles follow a business workflow covering AI-assisted quotation,
+approval, production, inventory, tasks, notifications, shipment and a full audit trail.
+
+**PUBLIC SIMULATION MODE** uses deterministic synthetic data and is independently
+runnable without private Framework source. Approval is a **DEMO HUMAN APPROVAL
+SIMULATION**; no real business system is contacted. This mode demonstrates business
+behavior and governance boundaries; it does not prove commercial Framework execution.
+
+Requires **Python 3.10+**, standard library only. From this repository's root:
+
+```sh
+python3 demo/manufacturing/run_demo.py
+```
+
+Open `http://127.0.0.1:8765/` and use a demo account to log in.
+See [demo accounts and setup](demo/manufacturing/README.md),
+[demo story](demo/manufacturing/EXPECTED_FLOW.md) and
+[public/private boundary](demo/manufacturing/docs/BOUNDARY.md).
+
+---
+
+## Secondary technical demo — governed refund / UNKNOWN / reconciliation
 
 ### Run the deterministic refund demo
 
@@ -29,59 +56,7 @@ GAF_DEMO_MODE=auto python3 demo.py
 Synthetic data, simulated approval, no live business system. Command truth remains **UNKNOWN**;
 reconciliation reports **MATCHED (derived)**, not command success.
 
-![General Agent Framework — conceptual business homepage](assets/business-home-general.png)
-
-*Conceptual business application view — not an existing product. The "VERIFIED DEMO OUTPUT" band quotes the real deterministic run shipped in this repository.*
-
-<img src="assets/visuals/framework-overview.png" width="100%" alt="General Agent Framework — conceptual governed-action lifecycle and public showcase boundary">
-
-*Conceptual framework overview — a framing of the problem space, not an internal module map or a certification.*
-
----
-
-## Why this exists
-
-Many agent frameworks make it easy to decide what to do. Very few make it safe to *do*
-something irreversible in a system you do not own.
-
-Connecting a model to a tool is a day of work. Making the resulting action survive contact with
-a real business system is not, because the failure modes are not the loud ones. They are these:
-
-| Failure mode | What actually goes wrong |
-|---|---|
-| **The action happens before anyone approves it** | An agent that is *usually right* becomes an agent that refunds, deletes or pays without a human in the loop — and the mistake is discovered afterwards. |
-| **The outcome is unknown** | The external system may have committed the write *after* the network dropped the response. The caller is left with no idea whether the side effect happened. Retrying can duplicate it. Not retrying can lose it. |
-| **Somebody retries anyway** | "It timed out, so it failed" is a reasonable assumption with an unreasonable consequence: a duplicated refund, a double charge, a repeated notification. |
-
-The General Agent Framework treats those as first-class problems rather than edge cases.
-
----
-
-## Core capabilities
-
-The framework is built around the concerns this demo illustrates. In the order an action moves
-through them:
-
-- **Governed actions** — an action that changes an external system is expressed as a write
-  intent that must pass explicit checks before it can exist, not as a raw function call.
-- **Human approval** — approval is a structural precondition, not a setting. A write intent
-  with no approval binding cannot be constructed at all.
-- **Durable execution** — the intent to act is recorded durably before the external call is
-  made, so a crash leaves evidence rather than silence.
-- **Safe external writes** — idempotency keys are derived once and stay stable across retries;
-  an indeterminate outcome is never optimistically re-sent.
-- **Reconciliation & recovery** — uncertainty is resolved by reading authoritative external
-  state, not by guessing.
-- **Auditability** — the decision path is captured as evidence that can be replayed and checked.
-- **Extensibility** — the external connection is an adapter boundary, so the governance layer
-  does not have to know what system is on the other side.
-
-> These are the concerns the demo exercises — a framing of the problem space, not a published
-> module list or an official architecture taxonomy.
-
----
-
-## Real, verified demo
+### Real, verified demo
 
 Everything below is captured from a **real, deterministic run** of a public demo that ships in
 this repository at [`demo/`](demo/README.md). Synthetic data only, no network, no credentials.
@@ -142,10 +117,60 @@ is grounded in this synthetic deterministic run; its application view is illustr
 
 ---
 
+## Core capabilities
+
+The framework is built around the concerns the technical refund demo illustrates. In the order
+an action moves through them:
+
+- **Governed actions** — an action that changes an external system is expressed as a write
+  intent that must pass explicit checks before it can exist, not as a raw function call.
+- **Human approval** — approval is a structural precondition, not a setting. A write intent
+  with no approval binding cannot be constructed at all.
+- **Durable execution** — the intent to act is recorded durably before the external call is
+  made, so a crash leaves evidence rather than silence.
+- **Safe external writes** — idempotency keys are derived once and stay stable across retries;
+  an indeterminate outcome is never optimistically re-sent.
+- **Reconciliation & recovery** — uncertainty is resolved by reading authoritative external
+  state, not by guessing.
+- **Auditability** — the decision path is captured as evidence that can be replayed and checked.
+- **Extensibility** — the external connection is an adapter boundary, so the governance layer
+  does not have to know what system is on the other side.
+
+> These are the concerns the technical refund demo exercises — a framing of the problem space,
+> not a published module list or an official architecture taxonomy.
+
+---
+
+## Why this exists
+
+Many agent frameworks make it easy to decide what to do. Very few make it safe to *do*
+something irreversible in a system you do not own.
+
+Connecting a model to a tool is a day of work. Making the resulting action survive contact with
+a real business system is not, because the failure modes are not the loud ones. They are these:
+
+| Failure mode | What actually goes wrong |
+|---|---|
+| **The action happens before anyone approves it** | An agent that is *usually right* becomes an agent that refunds, deletes or pays without a human in the loop — and the mistake is discovered afterwards. |
+| **The outcome is unknown** | The external system may have committed the write *after* the network dropped the response. The caller is left with no idea whether the side effect happened. Retrying can duplicate it. Not retrying can lose it. |
+| **Somebody retries anyway** | "It timed out, so it failed" is a reasonable assumption with an unreasonable consequence: a duplicated refund, a double charge, a repeated notification. |
+
+The General Agent Framework treats those as first-class problems rather than edge cases.
+
+---
+
 ## Architecture overview
 
-The framework overview near the introduction shows a **conceptual governed-write lifecycle** —
-the concerns this demo illustrates, drawn end to end:
+![General Agent Framework — conceptual business homepage](assets/business-home-general.png)
+
+*Conceptual business application view — not an existing product. The "VERIFIED DEMO OUTPUT" band quotes the real deterministic run shipped in this repository.*
+
+<img src="assets/visuals/framework-overview.png" width="100%" alt="General Agent Framework — conceptual governed-action lifecycle and public showcase boundary">
+
+*Conceptual framework overview — a framing of the problem space, not an internal module map or a certification.*
+
+The framework overview above shows a **conceptual governed-write lifecycle** —
+the concerns the technical refund demo illustrates, drawn end to end:
 
 ```text
 Agent / Application
@@ -163,7 +188,7 @@ Evidence / Audit
 
 It is a framing of the problem space, not the framework's internal architecture and not a module
 list. The **commercial implementation is private and is not present in this repository**; this
-repository contains documentation, the public demo, and visual assets only.
+repository contains documentation, public demos, examples and visual assets only.
 
 Further reading: [Conceptual architecture](docs/architecture.md) ·
 [Governed actions](docs/governed-actions.md) ·
@@ -211,7 +236,7 @@ privately licensed.
 |---|---|
 | Product documentation (`docs/`) | Commercial framework implementation source |
 | Conceptual architecture overview | Full private test suite |
-| The public demo (`demo/`) | Customer-specific bundles |
+| Public demos (`demo/`, including `demo/manufacturing/`) | Customer-specific bundles |
 | Screenshots and visual assets | Private licensing and delivery arrangements |
 | Controlled examples | |
 
