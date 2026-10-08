@@ -13,6 +13,12 @@ This **public showcase** contains documentation, demos, screenshots/visuals and 
 The commercial Framework implementation remains **private and separately licensed**.
 This repository is proprietary, all rights reserved — see [LICENSE](LICENSE).
 
+[Visit the public showcase website](https://pathetichomeless-star.github.io/general-agent-framework/)
+
+The GitHub Pages website is a **static public showcase**; it does not run the manufacturing application online.
+The **Manufacturing Demo** is a locally runnable public simulation and remains the primary business demo;
+the governed refund demo remains the secondary technical demo.
+
 [Primary business demo ↓](#primary-business-demo--hongsheng-works--宏晟智造) · [Secondary technical demo ↓](#secondary-technical-demo--governed-refund--unknown--reconciliation) · [Public vs commercial boundary](#public-vs-commercial-boundary)
 
 ## Primary business demo — Hongsheng Works / 宏晟智造
