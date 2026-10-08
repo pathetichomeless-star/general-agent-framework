@@ -1,0 +1,16 @@
+{
+  "pages": [
+    {"source": "home.html", "output": "index.html", "nav": "Home", "lang": "en", "title": "General Agent Framework — Governed AI Actions", "description": "Explore governed AI actions through a manufacturing simulation, human approval and UNKNOWN-aware reconciliation. Public documentation; private commercial implementation."},
+    {"source": "manufacturing.html", "output": "manufacturing-demo.html", "nav": "Manufacturing Demo", "lang": "zh-CN", "title": "宏晟智造 Manufacturing Demo — General Agent Framework", "description": "从报价、缺料审批到发货对账：宏晟智造公共模拟故事，使用确定性合成数据，分别保留 UNKNOWN 命令真相与 MATCHED（推导）外部判定。"},
+    {"source": "governed-actions.html", "output": "governed-actions.html", "nav": "Governed Actions", "lang": "en", "title": "Governed Actions & Human Approval — General Agent Framework", "description": "Follow a proposed business action through authorization, human approval, durable intent and evidence. Conceptual explanation with explicit demo and audit limits."},
+    {"source": "reconciliation.html", "output": "reconciliation.html", "nav": "UNKNOWN & Reconciliation", "lang": "en", "title": "UNKNOWN Outcomes & Reconciliation — General Agent Framework", "description": "Understand response loss, unsafe blind retries and fresh external observations. UNKNOWN command truth stays separate from MATCHED, a derived reconciliation verdict."},
+    {"source": "concepts.html", "output": "concepts.html", "nav": "Concepts", "lang": "en", "title": "Conceptual Governed-Action Lifecycle — General Agent Framework", "description": "A conceptual lifecycle for governed AI actions, from application decisions to evidence and recovery. A guide to the problem space, not an internal module map."},
+    {"source": "boundary.html", "output": "boundary.html", "nav": "Public / Commercial Boundary", "lang": "en", "title": "Public / Commercial Boundary — General Agent Framework", "description": "What the public showcase contains, what remains privately licensed, and where to find license, commercial and security information. No certification or SLA is implied."}
+  ],
+  "assets": [
+    {"source": "assets/manufacturing-owner-dashboard.png", "output": "assets/manufacturing-owner-dashboard.png", "sha256": "a75921b961fc9917c176cb455ecc00f1e62b7521a82250b1b81b8389625a04ab"},
+    {"source": "assets/manufacturing-ai-human-approval.png", "output": "assets/manufacturing-ai-human-approval.png", "sha256": "b24ae8bea3f135bd1cfc4eb84a6b9d0b8d702fde24fbd5781fefa7a69a50d603"},
+    {"source": "assets/manufacturing-shipment-reconciliation.png", "output": "assets/manufacturing-shipment-reconciliation.png", "sha256": "da344a42a50a363cbb50a99c7470c2df43907a63e473f537c5bb2073967d466c"},
+    {"source": "assets/terminal-demo-overview.png", "output": "assets/terminal-demo-overview.png", "sha256": "bb8d001599c43da979929cc4fc9fe88550f35c025563f4bd0e316c8a11417fcc"}
+  ]
+}

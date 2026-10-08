@@ -7,3 +7,4 @@ __pycache__/
 demo-run/
 .DS_Store
 .env*
+_site/
