@@ -25,6 +25,7 @@ ROUTES = {
     "reconciliation.html": "reconciliation.html",
     "concepts.html": "concepts.html",
     "boundary.html": "boundary.html",
+    "licensing.html": "licensing.html",
 }
 ASSETS = {
     "assets/manufacturing-owner-dashboard.png": "a75921b961fc9917c176cb455ecc00f1e62b7521a82250b1b81b8389625a04ab",
@@ -97,7 +98,7 @@ def load_sources():
         require(sha(data[name]) == digest, "Frozen source checksum mismatch: " + name)
     config = json.loads(data["site/pages.json"])
     require(set(config) == {"pages", "assets"}, "Unexpected configuration keys")
-    require(isinstance(config["pages"], list) and len(config["pages"]) == 6, "Expected six pages")
+    require(isinstance(config["pages"], list) and len(config["pages"]) == 7, "Expected seven pages")
     seen = set()
     for page in config["pages"]:
         require(set(page) == {"source", "output", "nav", "lang", "title", "description"}, "Unexpected page keys")
@@ -108,7 +109,7 @@ def load_sources():
         require(page["lang"] in ("en", "zh-CN"), "Unsupported page language")
         seen.add(page["source"])
     for key in ("title", "description", "nav"):
-        require(len({p[key] for p in config["pages"]}) == 6, "Page " + key + " must be unique")
+        require(len({p[key] for p in config["pages"]}) == 7, "Page " + key + " must be unique")
     expected_assets = [{"source": name, "output": name, "sha256": digest} for name, digest in ASSETS.items()]
     require(config["assets"] == expected_assets, "Asset configuration differs from frozen whitelist")
     return data, config["pages"]
@@ -212,7 +213,7 @@ def render(data, pages, base):
 
 def validate_artifact(pages, base, expected):
     """Fully validate rendered bytes before deleting or writing any output."""
-    require(set(expected) == FILES, "Artifact must match exact 13-file whitelist")
+    require(set(expected) == FILES, "Artifact must match exact 14-file whitelist")
     documents = {}
     for name in FILES:
         actual = expected[name]
@@ -275,7 +276,7 @@ def validate_artifact(pages, base, expected):
 
 def validate_output(output, expected):
     """Audit only the exact on-disk copies of the prevalidated artifact."""
-    require(inventory(output) == FILES, "Output inventory must match exact 13-file whitelist")
+    require(inventory(output) == FILES, "Output inventory must match exact 14-file whitelist")
     for name in FILES:
         require(safe_path(output, name).read_bytes() == expected[name], "Output differs from approved sources/build: " + name)
 
@@ -305,7 +306,7 @@ def run(base_url, validate_only=False):
         for name, content in artifact.items():
             safe_path(output, name).write_bytes(content)
     validate_output(output, artifact)
-    print("VALIDATED: exact 13-file public artifact; six pages, local links/anchors, metadata and frozen images")
+    print("VALIDATED: exact 14-file public artifact; seven pages, local links/anchors, metadata and frozen images")
     print("base_url=" + base + " (local validation only; deployment not performed)")
     for name in sorted(FILES):
         print(sha(artifact[name]) + "  " + name)

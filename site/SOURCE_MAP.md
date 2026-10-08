@@ -10,6 +10,7 @@ This file documents public source material and claim scope. It is build-source d
 | Reconciliation | [Reconciliation and recovery](../docs/reconciliation-and-recovery.md), [technical expected flow](../demo/EXPECTED_FLOW.md), [technical setup](../demo/README.md) | UNKNOWN stays distinct from MATCHED (derived); freshness, conditional retry and provider assumptions; licensed rerun requirement |
 | Concepts | [Conceptual architecture](../docs/architecture.md) | Problem-space lifecycle only; no internal module map or implementation topology |
 | Boundary | [README](../README.md), [LICENSE](../LICENSE), [COMMERCIAL](../COMMERCIAL.md), [SECURITY](../SECURITY.md) | Public to view, all rights reserved; commercial implementation privately licensed; existing public contact and no SLA |
+| Licensing & Contact | [README](../README.md), [COMMERCIAL](../COMMERCIAL.md), [LICENSE](../LICENSE), [SECURITY](../SECURITY.md) | Evaluation, licensing, source-access and commercial-use enquiries; private licence discussion and agreement-scoped delivery only; no fixed published price or SLA; existing mailbox and WeChat; separate security category and concise Chinese summary |
 
 ## Asset scope
 
@@ -22,6 +23,8 @@ The ambiguous conceptual overview image is intentionally not published. No addit
 
 ## Build and metadata
 
-The six fragments share `layout.html` and `styles.css`. `pages.json` supplies escaped metadata, navigation and explicit routes. The builder requires a centralized HTTPS project `base_url`; the prospective local-validation URL does not establish deployment approval or a live site. Canonical, Open Graph and sitemap URLs use that same input. Ordinary navigation and assets use relative links.
+The seven fragments share `layout.html` and `styles.css`. `pages.json` supplies escaped metadata, navigation and explicit routes. The builder requires a centralized HTTPS project `base_url`; local validation does not authorize publication of these changes. Canonical, Open Graph and sitemap URLs use that same input. Ordinary navigation and assets use relative links.
 
-Local validation builds only `_site/`. Its exact 13-file inventory excludes these sources, contracts, runtime data and all other repository files. No deployment workflow is part of this implementation. Publication, settings, artifact uploads, commits and pushes require separate authorization.
+Local validation builds only `_site/`. Its exact 14-file inventory comprises seven HTML pages (including `licensing.html`), four frozen PNG assets, `styles.css`, `sitemap.xml` and `.nojekyll`. It excludes these sources, contracts, runtime data and all other repository files. The explicit route and asset whitelists, static-content and forbidden-content checks, metadata and sitemap validation, accessibility checks, asset SHA256 verification, symlink/hardlink protection and fail-closed output inventory checks remain in force.
+
+The existing manual Pages workflow remains unchanged and checks out frozen showcase source commit `ac586b3718d0f6b109c69b1be053900b6cf7a286`. It will not include this page until a new audited source commit is separately authorized and its source pin is updated in a later, separately controlled commit. Publication, settings, artifact uploads, commits and pushes require separate authorization.

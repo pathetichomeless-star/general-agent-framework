@@ -281,6 +281,8 @@ the commercial framework. See [`LICENSE`](LICENSE) and [`COMMERCIAL.md`](COMMERC
 
 The commercial Framework is privately licensed and delivered.
 
+[Discuss commercial access by email](mailto:pathetichomeless@outlook.com?subject=%5BCOMMERCIAL%5D%20General%20Agent%20Framework)
+
 For evaluation, licensing, source-access or commercial-use discussions:
 
 - **Email:** pathetichomeless@outlook.com
