@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ac586b3718d0f6b109c69b1be053900b6cf7a286
+          ref: e98268eb65332ac87f352b83c778f5f418b6037f
           persist-credentials: false
 
       - name: Build and validate
