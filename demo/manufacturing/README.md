@@ -28,6 +28,17 @@ python3 demo/manufacturing/run_demo.py        # 默认 http://127.0.0.1:8765/
 
 运行测试 Tests: `python3 demo/manufacturing/tests/run_tests.py`
 
+## 已知限制 Known limitations
+
+本公共模拟器不具备生产就绪或完整安全认证结论。GAF-04/A/B/C/D 的修复和测试
+只覆盖各自范围；GAF-01（UNKNOWN 发货投影）、GAF-02（重复外部发货）、
+GAF-03（受治理动作授权）仍未关闭。库存金额估值、精确半分舍入及中断审查的
+其他发现也仍有未完成事项，详见 [业务完整性与未关闭事项](docs/BUSINESS_INTEGRITY.md)。
+
+This public simulator is not production-ready or security-certified. Passing
+the regression suite does not close the remaining findings or verify the
+private licensed Framework. See the linked scope and compatibility limitations.
+
 ## 8 分钟演示故事 Demo story
 
 销售用 AI 起草报价（8% 折扣自动送审批）→ 老板审批 → 订单确认 → AI 物料检查发现缺料 → 紧急采购审批 → 生产排产/领料/完工 → 仓库执行发货 → 承运商响应丢失，**命令真相诚实记录为 UNKNOWN** → 对账给出 **匹配（推导）** 的外部判定 → 老板/管理员在审计页回放全程并验证证据链。

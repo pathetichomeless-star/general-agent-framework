@@ -13,9 +13,12 @@ assistants, but the demo does not require it.
 from __future__ import annotations
 
 import json
+import math
+from decimal import Decimal, DecimalException, ROUND_HALF_UP, localcontext
 from typing import Any
 
 from framework_port import constants as C
+from framework_port import errors as E
 from framework_port.dtos import Principal, Record, RecordRef
 
 from . import i18n
@@ -37,15 +40,35 @@ def quote_draft(
     the human reviews, edits and submits it."""
 
     entries = backend.list_records(
-        actor, C.RECORD_PRICE_BOOK_ENTRY, filters={"product_id": product_id}
+        actor, C.RECORD_PRICE_BOOK_ENTRY,
+        filters={"product_id": product_id, "currency": "CNY", "state": "active"},
     )
-    list_price = _num(entries[0].fields.get("unit_price", 0)) if entries else 0.0
-    products = backend.list_records(actor, C.RECORD_PRODUCT, filters={"id": product_id})
-    product_name = ""
-    if products:
-        product_name = i18n.pick("zh", products[0].fields, "name")
-    unit_price = round(list_price * (1 - discount_pct / 100.0), 2)
-    total = round(unit_price * qty, 2)
+    products = backend.list_records(actor, C.RECORD_PRODUCT,
+                                   filters={"id": product_id, "state": "active"})
+    if len(entries) != 1 or len(products) != 1:
+        raise E.ValidationFailed("draft requires an unambiguous active product and CNY price book")
+    try:
+        price, quantity, discount = (Decimal(str(v)) for v in
+                                    (entries[0].fields["unit_price"], qty, discount_pct))
+        if (any(not v.is_finite() for v in (price, quantity, discount))
+                or price <= 0 or quantity <= 0 or not 0 <= discount <= 100):
+            raise ValueError()
+        with localcontext() as ctx:
+            ctx.prec = 100
+            proposed = price * (1 - discount / 100)
+            if proposed % Decimal("0.01") == Decimal("0.005"):
+                raise E.ValidationFailed("currency rounding midpoint requires an owner-approved rule")
+            unit = proposed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            proposed_total = unit * quantity
+            if proposed_total % Decimal("0.01") == Decimal("0.005"):
+                raise E.ValidationFailed("currency rounding midpoint requires an owner-approved rule")
+            amount = proposed_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        list_price, qty, discount_pct, unit_price, total = map(float, (price, quantity, discount, unit, amount))
+        if not all(math.isfinite(v) for v in (list_price, qty, discount_pct, unit_price, total)):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError, DecimalException):
+        raise E.ValidationFailed("invalid quotation draft financial inputs") from None
+    product_name = i18n.pick("zh", products[0].fields, "name")
     rationale = (
         f"按价目表目录价 ¥{list_price:g} 与谈判折扣 {discount_pct:g}% 计算成交价 "
         f"¥{unit_price:g}；数量 {qty:g}，合计 ¥{total:g}。"

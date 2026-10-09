@@ -30,6 +30,8 @@ import json
 import secrets
 import sqlite3
 import threading
+from contextlib import contextmanager
+from decimal import localcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -56,6 +58,36 @@ from framework_port.dtos import (
     UserView,
 )
 from . import governed as G
+from . import financial as F
+
+# Public record edits cannot impersonate workflow or approval decisions.
+_CONTROLLED_FIELDS = frozenset({
+    "state", "status", "id", "owner_id", "version", "created_by", "created_at",
+    "updated_by", "updated_at", "requested_by", "requested_at", "decided_by",
+    "decided_at", "decision_note", "approval_binding", "_policy", "_production_binding",
+})
+_INITIAL_STATES = {
+    C.RECORD_QUOTATION: "draft", C.RECORD_SALES_ORDER: "draft",
+    C.RECORD_PRODUCTION_ORDER: "planned", C.RECORD_SHIPMENT: "requested",
+    C.RECORD_MATERIAL_REQUIREMENT: "open",
+}
+
+
+def _validate_public_fields(
+    fields: Mapping[str, Any], *, creating: bool = False, workflow: bool = True
+) -> None:
+    if not isinstance(fields, Mapping):
+        raise E.ValidationFailed("fields must be a mapping")
+    for name in fields:
+        if not isinstance(name, str):
+            raise E.ValidationFailed("field names must be strings")
+        if creating and name in {"id", "owner_id", "state"}:
+            continue
+        if name == "state" and not workflow:
+            continue  # master-data activation is not an approval decision
+        if name in _CONTROLLED_FIELDS or name.startswith(("approval_", "approved_")):
+            raise E.ValidationFailed(f"workflow-controlled field: {name}")
+
 
 _ID_PREFIX = {
     C.RECORD_CUSTOMER: "CUST",
@@ -110,6 +142,9 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE TABLE IF NOT EXISTS evidence (
   approval_id TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL,
   prev_hash TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (approval_id, seq)
+);
+CREATE TABLE IF NOT EXISTS approval_bindings (
+  approval_id TEXT PRIMARY KEY, binding TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS governed_actions (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
@@ -173,6 +208,30 @@ def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+class _SeedWriter:
+    """Short-lived fixture capability, bound only to an isolated staging DB."""
+
+    def __init__(self, backend: PublicSimulatedBackend) -> None:
+        self.__backend = backend
+        self.__thread = threading.get_ident()
+        self.__active = True
+
+    def _close(self) -> None:
+        self.__active = False
+
+    def create_record(
+        self, actor: Principal, record_type: str, fields: Mapping[str, Any]
+    ) -> Record:
+        if not self.__active or threading.get_ident() != self.__thread:
+            raise E.AuthorizationDenied("fixture writer is outside its initialization scope")
+        return self.__backend._create_record(actor, record_type, fields, historical=True)
+
+    def __getattr__(self, name):
+        if name not in {"list_records", "execute_business_action", "request_approval", "create_task"}:
+            raise AttributeError(name)
+        return getattr(self.__backend, name)
+
+
 class PublicSimulatedBackend:
     """Deterministic demo backend implementing the public Facade protocol."""
 
@@ -180,6 +239,7 @@ class PublicSimulatedBackend:
         self._config = config
         self._clock: Callable[[], str] = config.clock or _utc_now
         self._lock = threading.RLock()
+        self._approval_depth = 0
         self._db = sqlite3.connect(config.db_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
@@ -194,6 +254,30 @@ class PublicSimulatedBackend:
     # ------------------------------------------------------------------ util
     def _now(self) -> str:
         return self._clock()
+
+    def _commit_business(self) -> None:
+        if not self._approval_depth:
+            self._db.commit()
+
+    @contextmanager
+    def _approval_transaction(self):
+        """Keep nested notifications/tasks inside the admission or decision."""
+        outer = self._approval_depth == 0
+        if outer:
+            if self._db.in_transaction:
+                raise E.ValidationFailed("approval requires a settled database")
+            self._db.execute("BEGIN IMMEDIATE")
+        self._approval_depth += 1
+        try:
+            yield
+            if outer:
+                self._db.commit()
+        except Exception:
+            if outer:
+                self._db.rollback()
+            raise
+        finally:
+            self._approval_depth -= 1
 
     def _seed_counters(self) -> None:
         cur = self._db.execute("SELECT key FROM meta WHERE key='counters'")
@@ -277,6 +361,37 @@ class PublicSimulatedBackend:
             }
             self._approval_policies = list(approval_policies)
             self._approver_roles = {k: tuple(v) for k, v in (approver_roles or {}).items()}
+
+    def _initialize_demo_seed(
+        self, loader: Callable[[_SeedWriter], dict], rules: tuple[RoleRule, ...],
+        approval_policies: tuple[ApprovalPolicy, ...],
+        approver_roles: Mapping[str, tuple[str, ...]],
+    ) -> dict:
+        """Trusted application bootstrap, never an actor-authorized operation.
+
+        Business calls and policy changes serialize on the live lock. The
+        fixture writer uses a separate database and separate authorization
+        objects; neither its historical write capability nor its policies are
+        installed on this backend. Failed staging is discarded in full.
+        """
+        with self._lock:
+            if self._db.in_transaction:
+                raise E.ValidationFailed("initialization requires a settled database")
+            staged = PublicSimulatedBackend(BackendConfig(
+                db_path=":memory:", clock=self._clock,
+                application_id=self._config.application_id,
+            ))
+            writer = _SeedWriter(staged)
+            try:
+                self._db.backup(staged._db)
+                staged.configure_authorization(rules, approval_policies, approver_roles)
+                result = loader(writer)
+                if result.get("seeded"):
+                    staged._db.backup(self._db)
+                return result
+            finally:
+                writer._close()
+                staged.close()
 
     def close(self) -> None:
         with self._lock:
@@ -452,17 +567,58 @@ class PublicSimulatedBackend:
     def create_record(
         self, actor: Principal, record_type: str, fields: Mapping[str, Any]
     ) -> Record:
-        with self._lock:
+        return self._create_record(actor, record_type, fields)
+
+    def _create_record(
+        self, actor: Principal, record_type: str, fields: Mapping[str, Any],
+        *, historical: bool = False,
+    ) -> Record:
+        with self._lock, self._approval_transaction():
             self._check(actor, C.PERM_CREATE, record_type)
+            _validate_public_fields(fields, creating=True)
+            initial = _INITIAL_STATES.get(record_type, "draft")
+            if (record_type in _INITIAL_STATES and fields.get("state", initial) != initial
+                    and not historical):
+                raise E.AuthorizationDenied("historical states require trusted initialization")
+            data = dict(fields)
+            if record_type == C.RECORD_PRODUCTION_ORDER and not historical:
+                actor = self._approval_actor(actor)
+                parent_id = data.get("order_id")
+                if not isinstance(parent_id, str) or not parent_id:
+                    raise E.ValidationFailed("production requires a sales order identity")
+                spec, parent, _ = self._action_source(
+                    actor, RecordRef(C.RECORD_SALES_ORDER, parent_id), C.ACTION_PRODUCTION_ORDER_CREATE)
+                self._ensure_no_pending(parent, spec.action_id, {})
+                if data.get("owner_id", actor.actor_id) != actor.actor_id:
+                    raise E.AuthorizationDenied("production owner must be the requester")
+                if data.get("progress_pct", 0) != 0:
+                    raise E.ValidationFailed("new production must start at zero progress")
+                payload = {k: v for k, v in data.items()
+                           if k not in {"id", "owner_id", "state", "order_id", "progress_pct"}}
+                values = self._validated_action_payload(spec.action_id, parent, payload)
+                if self._match_policy(spec.action_id, values) is not None:
+                    raise E.ValidationFailed("production requires approval through the business action")
+                record_id = str(data.get("id") or self._next_id(record_type))
+                if self._get_row(record_type, record_id) is not None:
+                    raise E.DuplicateRequest(f"production_order '{record_id}' already exists")
+                rec = spec.creates_child(self, actor, parent, payload, record_id=record_id)
+                self._audit(actor.actor_id, f"{record_type}.create", rec.ref, detail="创建记录")
+                return rec
+            if record_type == C.RECORD_QUOTATION:
+                data = self._quote_values(data)
+            elif record_type == C.RECORD_SALES_ORDER:
+                data = F.line_values(data)
+                self._require_product(data["product_id"])
+            elif record_type in (C.RECORD_QUOTATION_LINE, C.RECORD_SALES_ORDER_LINE):
+                data = self._validate_new_line(actor, record_type, data, historical=historical)
             record_id = str(fields.get("id") or self._next_id(record_type))
             if self._get_row(record_type, record_id) is not None:
                 raise E.DuplicateRequest(f"{record_type} '{record_id}' already exists")
-            data = dict(fields)
             data.setdefault("owner_id", actor.actor_id)
-            data.setdefault("state", "draft")
+            data.setdefault("state", initial)
             rec = self._put_record(actor.actor_id, record_type, record_id, data)
             self._audit(actor.actor_id, f"{record_type}.create", rec.ref, detail="创建记录")
-            self._db.commit()
+            self._commit_business()
             return rec
 
     def update_record(
@@ -473,18 +629,53 @@ class PublicSimulatedBackend:
         *,
         expected_version: int,
     ) -> Record:
-        with self._lock:
+        with self._lock, self._approval_transaction():
             row = self._get_row(ref.record_type, ref.record_id)
             if row is None:
                 raise E.NotFound(f"{ref.record_type} '{ref.record_id}' not found")
             rec = self._row_to_record(row)
             self._check(actor, C.PERM_EDIT, ref.record_type, rec)
+            if isinstance(expected_version, bool) or not isinstance(expected_version, int):
+                raise E.ValidationFailed("expected_version must be an integer")
             if int(row["version"]) != expected_version:
                 raise E.VersionConflict(
                     f"expected version {expected_version}, current {row['version']}"
                 )
+            _validate_public_fields(fields, workflow=ref.record_type in _INITIAL_STATES)
+            if ref.record_type in (C.RECORD_QUOTATION, C.RECORD_SALES_ORDER):
+                if rec.fields.get("state") != "draft" and set(fields) - {"note"}:
+                    raise E.ValidationFailed("submitted business content cannot be edited directly")
+            if ref.record_type == C.RECORD_INVENTORY_ITEM and {"qty_on_hand", "item_ref"}.intersection(fields):
+                raise E.ValidationFailed("inventory quantity and identity require a business operation")
+            if ref.record_type == C.RECORD_PRODUCTION_ORDER and set(fields) - {"note", "due_date"}:
+                raise E.ValidationFailed("production content and relationships require a business operation")
             data = dict(rec.fields)
             data.update(fields)
+            if (ref.record_type in (C.RECORD_QUOTATION, C.RECORD_SALES_ORDER)
+                    and rec.fields.get("state") == "draft"):
+                # Check the old line before changing a draft; never repair divergent history.
+                lines = self._document_lines(rec)
+                if lines:
+                    self._document_values(rec)
+                if ref.record_type == C.RECORD_QUOTATION:
+                    if {"qty", "discount_pct", "list_price", "product_id"}.intersection(fields):
+                        for name in ("unit_price", "total_amount"):
+                            if name not in fields:
+                                data.pop(name, None)
+                    elif "unit_price" in fields and "discount_pct" not in fields:
+                        data.pop("discount_pct", None)
+                    if "unit_price" in fields and "total_amount" not in fields:
+                        data.pop("total_amount", None)
+                    if "product_id" in fields and "list_price" not in fields:
+                        data.pop("list_price", None)
+                    data = self._quote_values(data)
+                else:
+                    if {"qty", "unit_price"}.intersection(fields) and "total_amount" not in fields:
+                        data.pop("total_amount", None)
+                    data = F.line_values(data)
+                    self._require_product(data["product_id"])
+            elif ref.record_type in (C.RECORD_QUOTATION_LINE, C.RECORD_SALES_ORDER_LINE):
+                raise E.ValidationFailed("edit financial content through its draft document")
             updated = self._put_record(
                 actor.actor_id,
                 ref.record_type,
@@ -498,10 +689,316 @@ class PublicSimulatedBackend:
                 updated.ref,
                 detail="更新字段: " + ", ".join(sorted(fields.keys())),
             )
-            self._db.commit()
+            if (ref.record_type in (C.RECORD_QUOTATION, C.RECORD_SALES_ORDER)
+                    and rec.fields.get("state") == "draft"
+                    and {"product_id", "product_name", "qty", "unit_price", "discount_pct", "list_price", "currency"}.intersection(fields)):
+                self._sync_document_line(actor, updated)
+            self._commit_business()
             return updated
 
     # ---------------------------------------------------- business actions
+    def _require_product(self, product_id):
+        if not isinstance(product_id, str) or not product_id:
+            raise E.ValidationFailed("financial content requires a product_id")
+        row = self._get_row(C.RECORD_PRODUCT, product_id)
+        if row is None or self._row_to_record(row).fields.get("state") != "active":
+            raise E.ValidationFailed("financial content requires an active product")
+        return self._row_to_record(row)
+
+    def _catalog(self, product_id, currency):
+        product = self._require_product(product_id)
+        records = (self._row_to_record(r) for r in self._db.execute(
+            "SELECT * FROM records WHERE record_type=? ORDER BY id", (C.RECORD_PRICE_BOOK_ENTRY,)))
+        entries = [rec for rec in records if rec.fields.get("product_id") == product_id
+                   and rec.fields.get("currency") == currency and rec.fields.get("state") == "active"]
+        if len(entries) != 1:
+            raise E.ValidationFailed("quotation needs exactly one active currency-matched price-book entry")
+        price = F.money(entries[0].fields.get("unit_price"), "catalog price")
+        if price <= 0:
+            raise E.ValidationFailed("catalog price must be positive")
+        return price, [product, entries[0]]
+
+    def _quote_values(self, fields):
+        currency = fields.get("currency", "CNY")
+        catalog, _ = self._catalog(fields.get("product_id"), currency)
+        if "list_price" in fields and F.money(fields["list_price"], "list_price") != catalog:
+            raise E.ValidationFailed("reference price disagrees with the authoritative price book")
+        discount = None
+        if "discount_pct" in fields:
+            discount = F.number(fields["discount_pct"], "discount_pct")
+            if not 0 <= discount <= 100:
+                raise E.ValidationFailed("discount_pct must be between 0 and 100")
+        with localcontext() as ctx:
+            ctx.prec = 100
+            if "unit_price" in fields:
+                unit = F.money(fields["unit_price"], "unit_price")
+                if discount is not None and unit != F.rounded(catalog * (1 - discount / 100)):
+                    if not (discount == 0 and unit >= catalog):
+                        raise E.ValidationFailed("selling price and declared discount disagree")
+            elif discount is not None:
+                unit = F.rounded(catalog * (1 - discount / 100))
+            else:
+                raise E.ValidationFailed("quotation requires a selling price or discount")
+            effective = max(0, (catalog - unit) * 100 / catalog)
+        data = F.line_values({**fields, "unit_price": F.json_number(unit)})
+        data["list_price"] = F.json_number(catalog)
+        # Declared percent is retained for display; policy uses the exact effective ratio.
+        data["discount_pct"] = float(effective) if discount is None else F.json_number(discount)
+        return data
+
+    def _document_lines(self, rec):
+        is_quote = rec.ref.record_type == C.RECORD_QUOTATION
+        line_type = C.RECORD_QUOTATION_LINE if is_quote else C.RECORD_SALES_ORDER_LINE
+        parent_key = "quotation_id" if is_quote else "order_id"
+        records = (self._row_to_record(r) for r in self._db.execute(
+            "SELECT * FROM records WHERE record_type=? ORDER BY id", (line_type,)))
+        return [line for line in records if line.fields.get(parent_key) == rec.ref.record_id]
+
+    def _document_values(self, rec):
+        is_quote = rec.ref.record_type == C.RECORD_QUOTATION
+        values = self._quote_values(rec.fields) if is_quote else F.line_values(rec.fields)
+        product = self._require_product(values["product_id"])
+        lines = self._document_lines(rec)
+        # The existing UI/agent contract quotes one product and creates one L1.
+        # Unspecified multi-line pricing is rejected, never guessed or reconciled.
+        if len(lines) != 1:
+            raise E.ValidationFailed("the single-product demo requires exactly one matching business line")
+        line = F.line_values(lines[0].fields)
+        for name in ("product_id", "qty", "unit_price", "total_amount", "currency"):
+            if line[name] != values[name]:
+                raise E.ValidationFailed("document header and business line disagree")
+        dependencies = [product, lines[0]]
+        if is_quote:
+            catalog, catalog_records = self._catalog(values["product_id"], values["currency"])
+            with localcontext() as ctx:
+                ctx.prec = 100
+                effective = max(0, (catalog - F.money(values["unit_price"], "unit_price")) * 100 / catalog)
+            values["discount_pct"] = str(effective)
+            dependencies = catalog_records + [lines[0]]
+        # Totals come from the validated line, not a separately submitted header total.
+        values["total_amount"] = line["total_amount"]
+        values["_business_dependencies"] = [self._record_binding(r) for r in dependencies]
+        return values
+
+    def _validate_new_line(self, actor, line_type, fields, *, historical=False):
+        is_quote = line_type == C.RECORD_QUOTATION_LINE
+        parent_type = C.RECORD_QUOTATION if is_quote else C.RECORD_SALES_ORDER
+        key = "quotation_id" if is_quote else "order_id"
+        row = self._get_row(parent_type, str(fields.get(key, "")))
+        if row is None:
+            raise E.ValidationFailed("business line requires an existing parent")
+        parent = self._row_to_record(row)
+        self._check(actor, C.PERM_VIEW, parent_type, parent)
+        self._check(actor, C.PERM_EDIT, parent_type, parent)
+        if parent.fields.get("state") != "draft" and not historical:
+            raise E.AuthorizationDenied("submitted business lines require trusted initialization")
+        if self._document_lines(parent):
+            raise E.ValidationFailed("the existing single-product document already has its business line")
+        values = F.line_values(fields)
+        header = F.line_values(parent.fields)
+        for name in ("product_id", "qty", "unit_price", "total_amount", "currency"):
+            if values[name] != header[name]:
+                raise E.ValidationFailed("business line must match its document")
+        values.pop("total_amount", None)  # derived on demand; existing line DTO shape
+        return values
+
+    def _sync_document_line(self, actor, rec):
+        lines = self._document_lines(rec)
+        if not lines:
+            return  # draft may await its first validated line
+        if len(lines) != 1:
+            raise E.ValidationFailed("cannot synchronize an ambiguous multi-line document")
+        line = lines[0]
+        fields = dict(line.fields)
+        for name in ("product_id", "product_name", "qty", "unit_price", "currency"):
+            if name in rec.fields:
+                fields[name] = rec.fields[name]
+        if "total_amount" in fields:
+            fields["total_amount"] = rec.fields["total_amount"]
+        if fields != line.fields:
+            self._put_record(actor.actor_id, line.ref.record_type, line.ref.record_id,
+                             fields, bump_version_from=line.ref.version)
+
+    def _inventory_adjustment(self, rec, payload):
+        if set(payload) - {"adjust_qty", "adjust_amount", "adjust_pct", "justification"}:
+            raise E.ValidationFailed("unsupported inventory adjustment input")
+        delta = F.quantity(payload.get("adjust_qty"), "adjust_qty", signed=True)
+        on_hand = F.number(rec.fields.get("qty_on_hand"), "qty_on_hand")
+        if on_hand < 0 or on_hand + delta < 0:
+            raise E.ValidationFailed("inventory adjustment would produce invalid stock")
+        F.json_number(on_hand + delta)
+        if on_hand == 0 and delta != 0:
+            raise E.ValidationFailed("adjustment percentage is undefined for zero stock")
+        with localcontext() as ctx:
+            ctx.prec = 100
+            pct = abs(delta) * 100 / on_hand if on_hand else F.number(0, "zero")
+        if "adjust_pct" in payload and F.number(payload["adjust_pct"], "adjust_pct") != pct:
+            raise E.ValidationFailed("client adjustment percentage disagrees with stored stock")
+        if "adjust_amount" in payload:
+            F.money(payload["adjust_amount"], "adjust_amount")
+            raise E.ValidationFailed("no authoritative inventory valuation is configured")
+        # Owner decision: no costs, client amounts or zero fallback. A configured
+        # monetary predicate cannot be evaluated safely for this data model.
+        def monetary(condition):
+            return condition.get("field") == "adjust_amount" or any(
+                monetary(c) for c in condition.get("of", []))
+        if any(p.action == C.ACTION_INVENTORY_ADJUST and monetary(p.condition)
+               for p in self._approval_policies):
+            raise E.ValidationFailed("inventory monetary risk is unknown; adjustment blocked")
+        return {**rec.fields, **payload, "adjust_qty": F.json_number(delta), "adjust_pct": str(pct)}
+
+    def _production_decision(self, row):
+        """Validate a completed decision as authority, never replay its effects."""
+        try:
+            binding, payload = self._approval_evidence_binding(row)
+            if row["status"] not in ("approved", "rejected"):
+                raise E.ValidationFailed("production cannot use an unresolved approval")
+            policy, roles = self._policy_binding(row["kind"], binding["policy_data"])
+            requester = self._principal_of(row["requested_by"])
+            decider = self._principal_of(row["decided_by"])
+            spec = get_action(row["kind"])
+            if (policy != binding["policy"] or roles != binding["roles"]
+                    or decider.role not in roles or decider.actor_id == requester.actor_id
+                    or requester.role not in spec.roles):
+                raise E.AuthorizationDenied("production approval authority is no longer valid")
+            event_row = self._db.execute(
+                "SELECT payload FROM evidence WHERE approval_id=? ORDER BY seq DESC LIMIT 1",
+                (row["id"],)).fetchone()
+            event = json.loads(event_row["payload"])["payload"]
+            if (event.get("event"), event.get("actor"), event.get("at"), event.get("comment")) != (
+                    row["status"], row["decided_by"], row["decided_at"], row["decision_note"]):
+                raise E.ValidationFailed("production approval decision evidence is invalid")
+            return binding, payload
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise E.ValidationFailed("malformed production approval evidence") from None
+
+    def _production_parent(self, order, states):
+        row = self._get_row(C.RECORD_SALES_ORDER, order.ref.record_id)
+        if order.ref.record_type != C.RECORD_SALES_ORDER or row is None:
+            raise E.ValidationFailed("production parent must be an existing sales order")
+        live = self._row_to_record(row)
+        if self._record_binding(live) != self._record_binding(order):
+            raise E.VersionConflict("production parent has changed")
+        if live.fields.get("state") not in states:
+            raise E.ValidationFailed("sales order is not authorized for this production stage")
+        data = self._document_values(live)
+        confirmation_policy = self._match_policy(C.ACTION_SALES_ORDER_CONFIRM, data)
+        has_confirmation_authority = confirmation_policy is None
+        approvals = self._db.execute(
+            "SELECT * FROM approvals WHERE target_type=? AND target_id=? AND kind IN (?,?) ORDER BY rowid",
+            (C.RECORD_SALES_ORDER, live.ref.record_id, C.ACTION_SALES_ORDER_CONFIRM,
+             C.ACTION_SALES_ORDER_REQUEST_CHANGE)).fetchall()
+        latest = None
+        for approval in approvals:
+            binding, payload = self._production_decision(approval)
+            source, target = binding["source"], binding["target"]
+            spec = get_action(approval["kind"])
+            if ((source["type"], source["id"]) != (C.RECORD_SALES_ORDER, live.ref.record_id)
+                    or (target["type"], target["id"]) != (source["type"], source["id"])
+                    or source["state"] not in spec.from_states):
+                raise E.ValidationFailed("invalid production parent approval binding")
+            pending = {**source["fields"], "state": spec.pending_state}
+            if target["fields"] != pending or target["version"] != source["version"] + 1:
+                raise E.ValidationFailed("invalid production parent pending transition")
+            if approval["status"] == "approved":
+                expected = {**target["fields"], **payload.get("fields_delta", {}), "state": spec.to_state}
+                if approval["kind"] == C.ACTION_SALES_ORDER_REQUEST_CHANGE:
+                    expected.update({k: binding["policy_data"][k] for k in
+                                     ("product_id", "qty", "unit_price", "total_amount", "currency")})
+                if (confirmation_policy is not None
+                        and self._principal_of(approval["decided_by"]).role == confirmation_policy.approver_role
+                        and all(binding["policy_data"].get(k) == data[k] for k in
+                                ("product_id", "qty", "unit_price", "total_amount", "currency"))):
+                    has_confirmation_authority = True
+            else:
+                # A rejected change preserves the original authorized order;
+                # a rejected confirmation restores draft and cannot admit production.
+                expected = {**target["fields"], "state": spec.rejected_state}
+            latest = expected, target["version"] + 1
+        if latest:
+            expected, version = latest
+            if expected["state"] != "confirmed" or live.ref.version < version:
+                raise E.ValidationFailed("sales order approval has no valid completed effect")
+            if {k: v for k, v in live.fields.items() if k not in {"state", "note"}} != {
+                    k: v for k, v in expected.items() if k not in {"state", "note"}}:
+                raise E.VersionConflict("sales order content differs from its last approval")
+        if not has_confirmation_authority:
+            raise E.AuthorizationDenied("sales order lacks the required authoritative confirmation decision")
+        return live
+
+    def _production_context(self, po, action):
+        try:
+            binding = po.fields["_production_binding"]
+            snapshot = binding["parent"]
+            if (snapshot["type"] != C.RECORD_SALES_ORDER
+                    or snapshot["id"] != po.fields.get("order_id")
+                    or binding["content"] != {k: po.fields.get(k) for k in
+                                               ("product_id", "qty", "expedite", "substitute")}):
+                raise E.ValidationFailed("production relationship or approved content has changed")
+            parent = Record(RecordRef(snapshot["type"], snapshot["id"], snapshot["version"]), snapshot["fields"])
+            states = ("confirmed",) if action == C.ACTION_PRODUCTION_ORDER_RELEASE else ("in_production",)
+            self._production_parent(parent, states)
+            self._ensure_no_pending(parent, C.ACTION_PRODUCTION_ORDER_CREATE, {})
+            if self._document_values(parent)["_business_dependencies"] != binding["policy_data"]["_production_dependencies"]:
+                raise E.VersionConflict("production parent business dependencies have changed")
+            approvals = self._db.execute(
+                "SELECT * FROM approvals WHERE target_type=? AND target_id=? AND kind=? ORDER BY rowid",
+                (C.RECORD_PRODUCTION_ORDER, po.ref.record_id, C.ACTION_PRODUCTION_ORDER_CREATE)).fetchall()
+            for row in approvals:
+                evidence, _ = self._production_decision(row)
+                initial = evidence["target"]["fields"].get("_production_binding", {})
+                if (row["status"] != "approved"
+                        or (evidence["target"]["type"], evidence["target"]["id"]) != (
+                            C.RECORD_PRODUCTION_ORDER, po.ref.record_id)
+                        or evidence["target"]["state"] != "pending_approval"
+                        or evidence["source"]["type"] != C.RECORD_SALES_ORDER
+                        or evidence["source"]["state"] != "confirmed"
+                        or initial.get("parent") != evidence["source"]
+                        or initial.get("content") != binding["content"]
+                        or initial.get("policy_data") != binding["policy_data"]
+                        or po.ref.version < evidence["target"]["version"] + 1
+                        or evidence["source"]["id"] != po.fields["order_id"]
+                        or evidence["policy_data"] != binding["policy_data"]):
+                    raise E.ValidationFailed("production creation approval is not valid for this work order")
+            current_data = {**binding["policy_data"], "due_date": po.fields.get("due_date", "")}
+            if self._match_policy(C.ACTION_PRODUCTION_ORDER_CREATE, current_data) and not approvals:
+                raise E.ValidationFailed("production has no required creation approval")
+            if approvals and self._policy_binding(C.ACTION_PRODUCTION_ORDER_CREATE, current_data) != (
+                    evidence["policy"], evidence["roles"]):
+                raise E.AuthorizationDenied("production changes require a new policy decision")
+            return parent
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise E.ValidationFailed("production has no valid trusted parent binding") from None
+
+    def _advance_production_parent(self, actor, po, action, state):
+        if not self._approval_depth:
+            raise E.ValidationFailed("production side effects require a business transaction")
+        actor = self._approval_actor(actor)
+        spec = get_action(action)
+        if actor.role not in spec.roles:
+            raise E.AuthorizationDenied("production side effect no longer has action authority")
+        row = self._get_row(po.ref.record_type, po.ref.record_id)
+        if row is None:
+            raise E.ValidationFailed("production work order disappeared before its side effect")
+        live = self._row_to_record(row)
+        self._check(actor, C.PERM_VIEW, live.ref.record_type, live)
+        self._check(actor, C.PERM_EXECUTE, live.ref.record_type, live)
+        if (live.ref.version != po.ref.version + 1 or
+                live.fields.get("state") != spec.to_state or
+                live.fields.get("_production_binding") != po.fields.get("_production_binding")
+                or live.fields.get("order_id") != po.fields.get("order_id")):
+            raise E.VersionConflict("production changed before its parent side effect")
+        parent = self._production_context(live, action)
+        self._check(actor, C.PERM_VIEW, parent.ref.record_type, parent)
+        self._check(actor, C.PERM_EXECUTE, parent.ref.record_type, parent)
+        fields = {**parent.fields, "state": state}
+        updated = self._put_record(actor.actor_id, parent.ref.record_type, parent.ref.record_id,
+                                   fields, bump_version_from=parent.ref.version)
+        fields = dict(live.fields)
+        fields["_production_binding"] = {**fields["_production_binding"], "parent": self._record_binding(updated)}
+        self._put_record(actor.actor_id, live.ref.record_type, live.ref.record_id,
+                         fields, bump_version_from=live.ref.version)
+
     def execute_business_action(
         self,
         actor: Principal,
@@ -509,75 +1006,23 @@ class PublicSimulatedBackend:
         action: str,
         payload: Mapping[str, Any] | None = None,
     ) -> ActionResult:
-        with self._lock:
-            payload = dict(payload or {})
-            from .actions import get_action
-            spec = get_action(action)
-            if spec.resource_type != ref.record_type:
-                raise E.ValidationFailed(
-                    f"action '{action}' applies to {spec.resource_type}, not {ref.record_type}"
-                )
-            if spec.roles and actor.role not in spec.roles:
-                raise E.AuthorizationDenied(
-                    f"role '{actor.role}' may not execute '{action}'"
-                )
-            row = self._get_row(ref.record_type, ref.record_id)
-            if row is None:
-                raise E.NotFound(f"{ref.record_type} '{ref.record_id}' not found")
-            rec = self._row_to_record(row)
-            self._check(actor, C.PERM_EXECUTE, ref.record_type, rec)
-            state = str(rec.fields.get("state", ""))
-            if spec.from_states and state not in spec.from_states:
-                raise E.ValidationFailed(
-                    f"action '{action}' is not allowed while the record is '{state}'"
-                )
-            policy = self._match_policy(action, {**rec.fields, **payload})
+        with self._lock, self._approval_transaction():
+            payload = self._approval_payload({} if payload is None else payload)
+            actor = self._approval_actor(actor)
+            spec, rec, row = self._action_source(actor, ref, action)
+            if action == C.ACTION_PRODUCTION_ORDER_CREATE:
+                self._ensure_no_pending(rec, action, payload)
+            policy_data = self._validated_action_payload(action, rec, payload)
+            policy = self._match_policy(action, policy_data)
             if policy is not None:
-                if spec.creates_child is not None:
-                    # Child-record gate: the child record is created first and
-                    # starts in the pending state; approval resumes it.
-                    child = spec.creates_child(self, actor, rec, payload)
-                    crow = self._get_row(child.ref.record_type, child.ref.record_id)
-                    cfields = json.loads(crow["fields"])
-                    cfields["state"] = spec.child_pending_state
-                    self._put_record(
-                        actor.actor_id, child.ref.record_type, child.ref.record_id,
-                        cfields, bump_version_from=int(crow["version"]),
-                    )
-                    approval = self._create_approval(
-                        actor, kind=action, target=child.ref, payload=dict(payload),
-                        justification=str(payload.get("justification", "")),
-                    )
-                    self._audit(actor.actor_id, action, child.ref,
-                                detail=f"需要审批 → {approval.approval_id}")
-                    self._db.commit()
-                    return ActionResult(child.ref, spec.child_pending_state,
-                                        approval.approval_id, "已提交审批")
-                approval = self._create_approval(
-                    actor,
-                    kind=action,
-                    target=ref,
-                    payload={**payload},
+                view = self._admit_business_approval(
+                    actor, spec, rec, payload, policy_data,
                     justification=str(payload.get("justification", "")),
                 )
-                new_fields = dict(rec.fields)
-                new_fields["state"] = spec.pending_state
-                updated = self._put_record(
-                    actor.actor_id, ref.record_type, ref.record_id, new_fields,
-                    bump_version_from=int(row["version"]),
-                )
-                self._audit(
-                    actor.actor_id, action, updated.ref,
-                    detail=f"需要审批 → {approval.approval_id}",
-                )
-                self._db.commit()
-                return ActionResult(updated.ref, spec.pending_state, approval.approval_id,
-                                    "已提交审批")
-            try:
-                return self._apply_action(actor, rec, row, spec, payload)
-            except Exception:
-                self._db.rollback()  # failed side effects must not leak state
-                raise
+                target = self._row_to_record(self._get_row(view.target.record_type, view.target.record_id))
+                return ActionResult(target.ref, str(target.fields.get("state", "")),
+                                    view.approval_id, "已提交审批")
+            return self._apply_action(actor, rec, row, spec, payload)
 
     def _apply_action(self, actor: Principal, rec: Record, row: sqlite3.Row, spec, payload) -> ActionResult:
         """Apply an ungated action (or resume a gated one) and run side effects.
@@ -605,10 +1050,18 @@ class PublicSimulatedBackend:
                 delta = payload["fields_delta"]
                 if isinstance(delta, Mapping):
                     fields.update(delta)
-            self._put_record(
+            if spec.action_id == C.ACTION_PRODUCTION_ORDER_REPORT_PROGRESS and "progress_pct" in payload:
+                fields["progress_pct"] = payload["progress_pct"]
+            if spec.action_id == C.ACTION_SALES_ORDER_REQUEST_CHANGE:
+                values = self._validated_action_payload(spec.action_id, rec, payload)
+                fields.update({name: values[name] for name in
+                               ("product_id", "qty", "unit_price", "total_amount", "currency")})
+            updated = self._put_record(
                 actor.actor_id, rec.ref.record_type, rec.ref.record_id, fields,
                 bump_version_from=int(row["version"]),
             )
+            if spec.action_id == C.ACTION_SALES_ORDER_REQUEST_CHANGE:
+                self._sync_document_line(actor, updated)
         if spec.side_effects is not None:
             extra = spec.side_effects(self, actor, rec, payload, child_ref)
             if extra:
@@ -620,13 +1073,75 @@ class PublicSimulatedBackend:
             child_ref or rec.ref, parent=rollup,
             detail="执行完成" + ("；" + "；".join(note_parts) if note_parts else ""),
         )
-        self._db.commit()
+        self._commit_business()
         target_ref = child_ref or rec.ref
+        if rec.ref.record_type == C.RECORD_PRODUCTION_ORDER:
+            target_ref = self._row_to_record(self._get_row(rec.ref.record_type, rec.ref.record_id)).ref
         state = final_state
         if child_ref is not None:
             child_row = self._get_row(child_ref.record_type, child_ref.record_id)
             state = str(json.loads(child_row["fields"]).get("state", state))
         return ActionResult(target_ref, state, None, "；".join(note_parts))
+
+    def _validated_action_payload(
+        self, action: str, rec: Record, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        _validate_public_fields(payload)
+        if "fields_delta" in payload:
+            if not isinstance(payload["fields_delta"], Mapping):
+                raise E.ValidationFailed("fields_delta must be a mapping")
+            _validate_public_fields(payload["fields_delta"])
+        if action in (C.ACTION_QUOTATION_SUBMIT, C.ACTION_QUOTATION_ACCEPT):
+            if set(payload) - {"justification", "discount_pct"}:
+                raise E.ValidationFailed("quotation action cannot override business fields")
+            data = self._document_values(rec)
+            if "discount_pct" in payload and F.number(payload["discount_pct"], "discount_pct") != F.number(rec.fields["discount_pct"], "discount_pct"):
+                raise E.ValidationFailed("discount must match the stored quotation")
+            return data
+        if action == C.ACTION_SALES_ORDER_CONFIRM:
+            if set(payload) - {"justification"}:
+                raise E.ValidationFailed("order confirmation cannot override business fields")
+            return self._document_values(rec)
+        if action == C.ACTION_SALES_ORDER_REQUEST_CHANGE:
+            if set(payload) - {"justification", "price_change", "fields_delta"}:
+                raise E.ValidationFailed("unsupported order-change input")
+            current = self._document_values(rec)
+            delta = payload.get("fields_delta", {})
+            financial = {"product_id", "qty", "unit_price", "total_amount", "currency"}
+            if financial.intersection(delta) and payload.get("price_change") is not True:
+                raise E.ValidationFailed("price changes require the price-change approval path")
+            proposed = dict(rec.fields)
+            proposed.update(delta)
+            if {"qty", "unit_price"}.intersection(delta) and "total_amount" not in delta:
+                proposed.pop("total_amount", None)
+            proposed = F.line_values(proposed)
+            self._require_product(proposed["product_id"])
+            return {**proposed, **payload, "_business_dependencies": current["_business_dependencies"]}
+        if action == C.ACTION_INVENTORY_ADJUST:
+            return self._inventory_adjustment(rec, payload)
+        if action == C.ACTION_INVENTORY_RECEIPT:
+            if set(payload) - {"qty", "justification"}:
+                raise E.ValidationFailed("unsupported inventory receipt input")
+            qty = F.quantity(payload.get("qty"), "receipt quantity")
+            return {**rec.fields, **payload, "qty": F.json_number(qty)}
+        if action == C.ACTION_PRODUCTION_ORDER_CREATE:
+            allowed = {"product_id", "product_name", "qty", "due_date", "expedite",
+                       "substitute", "requirements", "justification"}
+            if set(payload) - allowed:
+                raise E.ValidationFailed("unsupported production creation input")
+            if any(type(payload.get(k, False)) is not bool for k in ("expedite", "substitute")):
+                raise E.ValidationFailed("production approval flags must be booleans")
+            self._production_parent(rec, ("confirmed",))
+            return {**rec.fields, **payload, "expedite": payload.get("expedite", False),
+                    "substitute": payload.get("substitute", False),
+                    "_production_dependencies": self._document_values(rec)["_business_dependencies"]}
+        if rec.ref.record_type == C.RECORD_PRODUCTION_ORDER:
+            delta = payload.get("fields_delta", {})
+            allowed = {"progress_pct"} if action == C.ACTION_PRODUCTION_ORDER_REPORT_PROGRESS else set()
+            if set(payload) - allowed - {"justification", "fields_delta"} or set(delta) - allowed:
+                raise E.ValidationFailed("production action cannot replace business relationships or content")
+            self._production_context(rec, action)
+        return {**rec.fields, **payload}
 
     def _match_policy(self, action: str, payload: Mapping[str, Any]) -> ApprovalPolicy | None:
         for policy in self._approval_policies:
@@ -635,59 +1150,181 @@ class PublicSimulatedBackend:
         return None
 
     # ----------------------------------------------------------- approvals
+    def _approval_actor(self, actor: Principal) -> Principal:
+        trusted = self._principal_of(actor.actor_id)
+        if trusted.role != actor.role:
+            raise E.AuthorizationDenied("approval actor role does not match the current identity")
+        return trusted
+
+    @staticmethod
+    def _approval_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+        _validate_public_fields(payload)
+        try:
+            # Freeze nested inputs before validating, binding or persisting them.
+            return json.loads(json.dumps(dict(payload), sort_keys=True, allow_nan=False))
+        except (TypeError, ValueError):
+            raise E.ValidationFailed("approval payload must be finite JSON data") from None
+
+    def _action_source(self, actor: Principal, ref: RecordRef, action: str):
+        spec = get_action(action)
+        if spec.resource_type != ref.record_type:
+            raise E.ValidationFailed("approval action does not apply to this object type")
+        if spec.roles and actor.role not in spec.roles:
+            raise E.AuthorizationDenied("requester may not perform this action")
+        row = self._get_row(ref.record_type, ref.record_id)
+        if row is None:
+            raise E.NotFound("approval business object not found")
+        rec = self._row_to_record(row)
+        self._check(actor, C.PERM_VIEW, ref.record_type, rec)
+        self._check(actor, C.PERM_EXECUTE, ref.record_type, rec)
+        if isinstance(ref.version, bool) or not isinstance(ref.version, int) or ref.version < 0:
+            raise E.ValidationFailed("invalid business object version")
+        if ref.version and ref.version != rec.ref.version:
+            raise E.VersionConflict("approval source version has changed")
+        if spec.from_states and rec.fields.get("state") not in spec.from_states:
+            raise E.ValidationFailed("action is not allowed in the source workflow state")
+        return spec, rec, row
+
+    @staticmethod
+    def _record_binding(rec: Record) -> dict[str, Any]:
+        return {"type": rec.ref.record_type, "id": rec.ref.record_id,
+                "version": rec.ref.version, "state": rec.fields.get("state", ""),
+                "fields": dict(rec.fields)}
+
+    def _policy_binding(self, kind: str, policy_data: Mapping[str, Any]):
+        configured = self._approver_roles.get(kind, ())
+        policy = self._match_policy(kind, policy_data)
+        roles = (policy.approver_role,) if policy else tuple(configured)
+        if not roles or any(role not in configured for role in roles):
+            raise E.AuthorizationDenied("no eligible approver for the matched policy")
+        bound_policy = None if policy is None else {
+            "action": policy.action, "condition": dict(policy.condition),
+            "approver_role": policy.approver_role,
+            "justification_label": policy.justification_label,
+        }
+        return bound_policy, list(roles)
+
+    def _ensure_no_pending(self, source: Record, kind: str, payload: Mapping[str, Any]) -> None:
+        rows = self._db.execute(
+            "SELECT a.*, b.binding FROM approvals a LEFT JOIN approval_bindings b"
+            " ON b.approval_id=a.id WHERE a.status='pending' AND a.kind=?", (kind,),
+        ).fetchall()
+        for row in rows:
+            same = (row["target_type"], row["target_id"]) == (source.ref.record_type, source.ref.record_id)
+            if row["binding"]:
+                try:
+                    origin = json.loads(row["binding"])["source"]
+                    same = same or (origin["type"], origin["id"]) == (source.ref.record_type, source.ref.record_id)
+                except (ValueError, KeyError, TypeError):
+                    raise E.ValidationFailed("malformed pending approval binding") from None
+            if same:
+                # Independent material purchases may share an order; competing
+                # requests for the same material are still refused.
+                if kind == C.APPROVAL_EXPEDITE_PURCHASE:
+                    previous = json.loads(row["payload"])
+                    if previous.get("material_id") != payload.get("material_id"):
+                        continue
+                raise E.DuplicateRequest("a pending approval already binds this operation")
+
+    def _admit_business_approval(self, actor, spec, source, payload, policy_data, *, justification):
+        if spec.creates_child is not None and spec.action_id != C.ACTION_PRODUCTION_ORDER_CREATE:
+            raise E.ValidationFailed("action has no child approval contract")
+        if spec.creates_child is None and not (spec.pending_state or spec.action_id == C.ACTION_INVENTORY_ADJUST):
+            raise E.ValidationFailed("action has no approval lifecycle contract")
+        self._policy_binding(spec.action_id, policy_data)
+        self._ensure_no_pending(source, spec.action_id, payload)
+        target = source
+        if spec.creates_child is not None:
+            child = spec.creates_child(self, actor, source, payload)
+            fields = dict(child.fields)
+            fields["state"] = spec.child_pending_state
+            target = self._put_record(actor.actor_id, child.ref.record_type, child.ref.record_id,
+                                      fields, bump_version_from=child.ref.version)
+        elif spec.pending_state:
+            fields = dict(source.fields)
+            fields["state"] = spec.pending_state
+            target = self._put_record(actor.actor_id, source.ref.record_type, source.ref.record_id,
+                                      fields, bump_version_from=source.ref.version)
+        view = self._create_approval(actor, kind=spec.action_id, source=source, target=target,
+                                     payload=payload, policy_data=policy_data, justification=justification)
+        self._audit(actor.actor_id, spec.action_id, target.ref,
+                    detail=f"需要审批 → {view.approval_id}")
+        return view
+
     def _create_approval(
-        self,
-        actor: Principal,
-        *,
-        kind: str,
-        target: RecordRef,
-        payload: Mapping[str, Any],
-        justification: str,
+        self, actor: Principal, *, kind: str, source: Record, target: Record,
+        payload: Mapping[str, Any], policy_data: Mapping[str, Any], justification: str,
     ) -> ApprovalView:
+        policy, roles = self._policy_binding(kind, policy_data)
         approval_id = self._next_id("approval")
         now = self._now()
+        binding = {"schema": 1, "id": approval_id, "kind": kind,
+                   "requested_by": actor.actor_id, "requested_at": now,
+                   "justification": justification,
+                   "source": self._record_binding(source), "target": self._record_binding(target),
+                   "payload": dict(payload), "policy_data": dict(policy_data),
+                   "policy": policy, "roles": roles}
+        encoded = _canonical(binding)
         self._db.execute(
             "INSERT INTO approvals (id, kind, target_type, target_id, requested_by, requested_at,"
             " justification, payload) VALUES (?,?,?,?,?,?,?,?)",
-            (approval_id, kind, target.record_type, target.record_id,
+            (approval_id, kind, target.ref.record_type, target.ref.record_id,
              actor.actor_id, now, justification, _canonical(dict(payload))),
         )
+        self._db.execute("INSERT INTO approval_bindings (approval_id, binding) VALUES (?,?)",
+                         (approval_id, encoded))
         self._evidence_append(
-            approval_id,
-            {"event": "requested", "actor": actor.actor_id, "at": now,
-             "kind": kind, "target": f"{target.record_type}:{target.record_id}",
-             "justification": justification},
+            approval_id, {"event": "requested", "actor": actor.actor_id, "at": now,
+                          "kind": kind, "target": f"{target.ref.record_type}:{target.ref.record_id}",
+                          "justification": justification,
+                          "binding_digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest()},
         )
-        approvers = self._approver_roles.get(kind, ())
-        self.notify(
-            actor, "approval.requested", tuple(approvers),
-            title=f"审批请求 {approval_id}",
-            body=f"{kind} 由 {actor.display_name} 提交，等待审批。",
-            priority=C.PRIORITY_CRITICAL, related=target,
-        )
-        return self.get_approval(actor, approval_id)  # type: ignore[return-value]
+        self.notify(actor, "approval.requested", tuple(roles),
+                    title=f"审批请求 {approval_id}",
+                    body=f"{kind} 由 {actor.display_name} 提交，等待审批。",
+                    priority=C.PRIORITY_CRITICAL, related=target.ref)
+        return self._approval_view(self._db.execute(
+            "SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone())
+
+    def _purchase_source(self, actor, ref):
+        if ref.record_type != C.RECORD_SALES_ORDER:
+            raise E.ValidationFailed("purchase approval requires a sales order")
+        if actor.role not in (C.ROLE_SALES, C.ROLE_FACTORY):
+            raise E.AuthorizationDenied("requester may not request a purchase")
+        row = self._get_row(ref.record_type, ref.record_id)
+        if row is None:
+            raise E.NotFound("purchase order not found")
+        rec = self._row_to_record(row)
+        self._check(actor, C.PERM_VIEW, ref.record_type, rec)
+        self._check(actor, C.PERM_EXECUTE, ref.record_type, rec)
+        if isinstance(ref.version, bool) or not isinstance(ref.version, int) or ref.version < 0:
+            raise E.ValidationFailed("invalid purchase source version")
+        if ref.version and ref.version != rec.ref.version:
+            raise E.VersionConflict("purchase source has changed")
+        if rec.fields.get("state") not in ("confirmed", "in_production", "ready_to_ship"):
+            raise E.ValidationFailed("purchase approval is not allowed in this state")
+        return rec
 
     def request_approval(
-        self,
-        actor: Principal,
-        kind: str,
-        target: RecordRef,
-        payload: Mapping[str, Any],
-        *,
-        justification: str,
+        self, actor: Principal, kind: str, target: RecordRef, payload: Mapping[str, Any],
+        *, justification: str,
     ) -> ApprovalView:
-        with self._lock:
-            row = self._get_row(target.record_type, target.record_id)
-            if row is None:
-                raise E.NotFound(f"{target.record_type} '{target.record_id}' not found")
-            rec = self._row_to_record(row)
-            self._check(actor, C.PERM_VIEW, target.record_type, rec)
-            if kind not in self._approver_roles:
-                raise E.ValidationFailed(f"unknown approval kind '{kind}'")
-            view = self._create_approval(actor, kind=kind, target=target,
-                                         payload=dict(payload), justification=justification)
-            self._db.commit()
-            return view
+        with self._lock, self._approval_transaction():
+            actor = self._approval_actor(actor)
+            payload = self._approval_payload(payload)
+            if kind in BUSINESS_ACTION_SPECS:
+                spec, rec, _ = self._action_source(actor, target, kind)
+                policy_data = self._validated_action_payload(kind, rec, payload)
+                return self._admit_business_approval(actor, spec, rec, payload, policy_data,
+                                                     justification=justification)
+            if kind != C.APPROVAL_EXPEDITE_PURCHASE:
+                raise E.ValidationFailed("unsupported approval operation")
+            rec = self._purchase_source(actor, target)
+            policy_data = self._validated_action_payload(kind, rec, payload)
+            self._ensure_no_pending(rec, kind, payload)
+            return self._create_approval(actor, kind=kind, source=rec, target=rec,
+                                         payload=payload, policy_data=policy_data,
+                                         justification=justification)
 
     def _approval_view(self, row: sqlite3.Row) -> ApprovalView:
         target = RecordRef(row["target_type"], row["target_id"])
@@ -710,7 +1347,7 @@ class PublicSimulatedBackend:
                 if pending_for_me and view.status != "pending":
                     continue
                 if pending_for_me:
-                    roles = self._approver_roles.get(view.kind, ())
+                    roles = self._actionable_approval_roles(row)
                     if actor.role not in roles:
                         continue
                     if view.requested_by == actor.actor_id:
@@ -732,97 +1369,221 @@ class PublicSimulatedBackend:
             allowed = (
                 actor.role in (C.ROLE_OWNER, C.ROLE_ADMIN)
                 or view.requested_by == actor.actor_id
-                or actor.role in self._approver_roles.get(view.kind, ())
+                or actor.role in self._actionable_approval_roles(row)
             )
             if not allowed:
                 raise E.AuthorizationDenied("审批详情仅请求人或审批角色可见")
             return view
 
-    def _decide(self, actor: Principal, approval_id: str, *, approve: bool, comment: str) -> ApprovalView:
+    def _validate_approval_binding(self, row: sqlite3.Row):
+        """Validate immutable evidence, live objects and current authority."""
         try:
+            return self._validate_approval_binding_inner(row)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise E.ValidationFailed("malformed approval binding or evidence") from None
+
+    def _approval_evidence_binding(self, row: sqlite3.Row):
+        """Read immutable approval evidence without requiring a still-pending target."""
+        stored = self._db.execute("SELECT binding FROM approval_bindings WHERE approval_id=?",
+                                  (row["id"],)).fetchone()
+        if stored is None:
+            raise E.ValidationFailed("approval has no trusted binding; submit a new request")
+        try:
+            binding = json.loads(stored["binding"])
+            if type(binding["schema"]) is not int or binding["schema"] != 1:
+                raise ValueError()
+            for key in ("id", "kind", "requested_by", "requested_at", "justification"):
+                if binding[key] != row[key]:
+                    raise ValueError()
+            payload = self._approval_payload(json.loads(row["payload"]))
+            if _canonical(payload) != _canonical(binding["payload"]):
+                raise ValueError()
+            source, target = binding["source"], binding["target"]
+            for snapshot in (source, target):
+                if (isinstance(snapshot["version"], bool) or not isinstance(snapshot["version"], int)
+                        or snapshot["version"] <= 0 or not isinstance(snapshot["fields"], dict)
+                        or not isinstance(snapshot["type"], str) or not snapshot["type"]
+                        or not isinstance(snapshot["id"], str) or not snapshot["id"]
+                        or snapshot["state"] != snapshot["fields"].get("state", "")):
+                    raise ValueError()
+            if (target["type"], target["id"]) != (row["target_type"], row["target_id"]):
+                raise ValueError()
+            first = self._db.execute(
+                "SELECT payload FROM evidence WHERE approval_id=? AND seq=1", (row["id"],),
+            ).fetchone()
+            event = json.loads(first["payload"])["payload"] if first else {}
+            if (event.get("event") != "requested" or event.get("binding_digest") !=
+                    hashlib.sha256(stored["binding"].encode("utf-8")).hexdigest()):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError):
+            raise E.ValidationFailed("approval payload, target or binding was substituted") from None
+        chain = self.verify_evidence_chain(self._principal_of(row["requested_by"]),
+                                           RecordRef("approval", row["id"]))
+        if not chain.verified:
+            raise E.ValidationFailed("approval evidence is invalid")
+        return binding, payload
+
+    def _validate_approval_binding_inner(self, row: sqlite3.Row):
+        binding, payload = self._approval_evidence_binding(row)
+        source, target = binding["source"], binding["target"]
+        requester = self._principal_of(row["requested_by"])
+        origin = Record(RecordRef(source["type"], source["id"], source["version"]), source["fields"])
+        live_row = self._get_row(target["type"], target["id"])
+        if live_row is None:
+            raise E.ValidationFailed("bound approval target no longer exists")
+        live = self._row_to_record(live_row)
+        if live.ref.version != target["version"]:
+            raise E.VersionConflict("approval target version has changed")
+        if self._record_binding(live) != target:
+            raise E.ValidationFailed("approval target no longer has the bound content or state")
+        if row["kind"] in BUSINESS_ACTION_SPECS:
+            spec = get_action(row["kind"])
+            if source["type"] != spec.resource_type or (spec.from_states and source["state"] not in spec.from_states):
+                raise E.ValidationFailed("invalid approval source/action binding")
+            if spec.roles and requester.role not in spec.roles:
+                raise E.AuthorizationDenied("requester no longer has action authority")
+            self._check(requester, C.PERM_VIEW, source["type"], origin)
+            self._check(requester, C.PERM_EXECUTE, source["type"], origin)
+            if spec.creates_child is not None:
+                if (spec.action_id != C.ACTION_PRODUCTION_ORDER_CREATE
+                        or target["type"] != C.RECORD_PRODUCTION_ORDER
+                        or target["state"] != spec.child_pending_state
+                        or target["fields"].get("order_id") != source["id"]):
+                    raise E.ValidationFailed("invalid child approval binding")
+                parent_row = self._get_row(source["type"], source["id"])
+                if parent_row is None or self._record_binding(self._row_to_record(parent_row)) != source:
+                    raise E.VersionConflict("approval parent has changed")
+            else:
+                if (target["type"], target["id"]) != (source["type"], source["id"]):
+                    raise E.ValidationFailed("in-place approval target differs from its source")
+                expected = dict(source["fields"])
+                if spec.pending_state:
+                    expected["state"] = spec.pending_state
+                if target["fields"] != expected:
+                    raise E.ValidationFailed("approval is not in the expected pending state")
+                if not (spec.pending_state or spec.action_id == C.ACTION_INVENTORY_ADJUST):
+                    raise E.ValidationFailed("unsupported approval lifecycle")
+        elif row["kind"] == C.APPROVAL_EXPEDITE_PURCHASE:
+            self._purchase_source(requester, origin.ref)
+            if source != target:
+                raise E.ValidationFailed("purchase approval target differs from its source")
+        else:
+            raise E.ValidationFailed("unsupported bound approval kind")
+        data = self._validated_action_payload(row["kind"], origin, payload)
+        if _canonical(data) != _canonical(binding["policy_data"]):
+            raise E.ValidationFailed("approval effective inputs have changed")
+        policy, roles = self._policy_binding(row["kind"], data)
+        if policy != binding["policy"] or roles != binding["roles"]:
+            raise E.AuthorizationDenied("approval policy or required roles have changed")
+        return binding, live, payload
+
+    def _actionable_approval_roles(self, row: sqlite3.Row) -> tuple[str, ...]:
+        try:
+            binding, _, _ = self._validate_approval_binding(row)
+            return tuple(binding["roles"])
+        except E.FacadeError:
+            return ()
+
+    def _decide(self, actor: Principal, approval_id: str, *, approve: bool, comment: str) -> ApprovalView:
+        with self._approval_transaction():
             return self._decide_inner(actor, approval_id, approve=approve, comment=comment)
-        except Exception:
-            self._db.rollback()
-            raise
 
     def _decide_inner(self, actor: Principal, approval_id: str, *, approve: bool, comment: str) -> ApprovalView:
+        actor = self._approval_actor(actor)
         row = self._db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
         if row is None:
             raise E.NotFound(f"approval '{approval_id}' not found")
         if row["status"] != "pending":
             raise E.ValidationFailed(f"approval '{approval_id}' already decided")
-        roles = self._approver_roles.get(row["kind"], ())
-        if actor.role not in roles:
-            raise E.AuthorizationDenied(
-                f"role '{actor.role}' may not decide approval kind '{row['kind']}'"
-            )
         if row["requested_by"] == actor.actor_id:
             raise E.AuthorizationDenied("请求者不能审批自己的请求（职责分离）")
+        binding, _, _ = self._validate_approval_binding(row)
+        if actor.role not in binding["roles"]:
+            raise E.AuthorizationDenied("role may not decide this policy-bound approval")
         now = self._now()
         status = "approved" if approve else "rejected"
-        self._db.execute(
-            "UPDATE approvals SET status=?, decided_by=?, decided_at=?, decision_note=? WHERE id=?",
+        changed = self._db.execute(
+            "UPDATE approvals SET status=?, decided_by=?, decided_at=?, decision_note=?"
+            " WHERE id=? AND status='pending'",
             (status, actor.actor_id, now, comment, approval_id),
         )
-        self._evidence_append(
-            approval_id,
-            {"event": status, "actor": actor.actor_id, "at": now, "comment": comment},
-        )
-        view = self._approval_view(
-            self._db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
-        )
-        target = view.target
-        requester = self._principal_of(row["requested_by"])
-        self.notify(
-            actor, "approval.decided", (requester.actor_id,),
-            title=f"审批{'通过' if approve else '拒绝'} {approval_id}",
-            body=f"{row['kind']}：{'通过' if approve else '拒绝'}。{comment}".strip(),
-            priority=C.PRIORITY_NORMAL, related=target,
-        )
-        self._audit(actor.actor_id, f"approval.{status}", target,
+        if changed.rowcount != 1:
+            raise E.VersionConflict("approval was decided concurrently")
+        self._evidence_append(approval_id,
+                              {"event": status, "actor": actor.actor_id, "at": now, "comment": comment})
+        view = self._approval_view(self._db.execute(
+            "SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone())
+        self.notify(actor, "approval.decided", (row["requested_by"],),
+                    title=f"审批{'通过' if approve else '拒绝'} {approval_id}",
+                    body=f"{row['kind']}：{'通过' if approve else '拒绝'}。{comment}".strip(),
+                    priority=C.PRIORITY_NORMAL, related=view.target)
+        self._audit(actor.actor_id, f"approval.{status}", view.target,
                     detail=f"{approval_id} {row['kind']} {comment}".strip())
         if approve:
             self._resume_approved(view)
-        self._db.commit()
+        else:
+            self._apply_rejection(view)
         return view
 
-    def _resume_approved(self, view: ApprovalView) -> None:
-        """Auto-resume whatever the approval was gating."""
+    def _decision_binding(self, view: ApprovalView, status: str):
+        if not self._approval_depth:
+            raise E.ValidationFailed("approval side effects require the decision transaction")
+        row = self._db.execute("SELECT * FROM approvals WHERE id=?", (view.approval_id,)).fetchone()
+        if row is None or row["status"] != status or self._approval_view(row) != view:
+            raise E.ValidationFailed("decision view does not match the stored approval")
+        binding, rec, payload = self._validate_approval_binding(row)
+        actor = self._principal_of(view.decided_by)
+        if actor.actor_id == view.requested_by or actor.role not in binding["roles"]:
+            raise E.AuthorizationDenied("decision no longer has independent approval authority")
+        evidence = self._db.execute(
+            "SELECT payload FROM evidence WHERE approval_id=? ORDER BY seq DESC LIMIT 1",
+            (view.approval_id,),
+        ).fetchone()
+        event = json.loads(evidence["payload"])["payload"]
+        if (event.get("event"), event.get("actor"), event.get("at"), event.get("comment")) != (
+                status, view.decided_by, view.decided_at, view.decision_note):
+            raise E.ValidationFailed("approval decision has no matching evidence")
+        return rec, payload, actor
 
-        from .actions import get_action, get_standalone_handler
-        payload = dict(view.payload)
-        payload.pop("_policy", None)
+    def _resume_approved(self, view: ApprovalView) -> None:
+        rec, payload, actor = self._decision_binding(view, "approved")
         if view.kind in BUSINESS_ACTION_SPECS:
             spec = get_action(view.kind)
-            row = self._get_row(view.target.record_type, view.target.record_id)
-            if row is None:
-                return
-            rec = self._row_to_record(row)
-            actor = self._principal_of(view.decided_by)
-            if spec.creates_child is not None:
-                # child record already exists in pending state; finish it
-                fields = dict(rec.fields)
+            fields = dict(rec.fields)
+            if spec.to_state:
                 fields["state"] = spec.to_state
-                self._put_record(actor.actor_id, rec.ref.record_type, rec.ref.record_id,
-                                 fields, bump_version_from=int(row["version"]))
-                if spec.side_effects is not None:
-                    spec.side_effects(self, actor, rec, payload, rec.ref)
-                self._audit(actor.actor_id, view.kind, rec.ref, detail="审批通过，自动继续执行")
-            else:
-                fields = dict(rec.fields)
-                fields["state"] = spec.to_state
-                if payload.get("fields_delta") and isinstance(payload["fields_delta"], Mapping):
-                    fields.update(payload["fields_delta"])
-                self._put_record(actor.actor_id, rec.ref.record_type, rec.ref.record_id,
-                                 fields, bump_version_from=int(row["version"]))
-                if spec.resume_side_effects is not None:
-                    spec.resume_side_effects(self, actor, rec, payload)
-                self._audit(actor.actor_id, view.kind, rec.ref, detail="审批通过，动作生效")
-            return
-        handler = get_standalone_handler(view.kind)
-        if handler is not None:
-            actor = self._principal_of(view.decided_by)
+            if spec.creates_child is None:
+                fields.update(payload.get("fields_delta", {}))
+            if view.kind == C.ACTION_SALES_ORDER_REQUEST_CHANGE:
+                values = self._validated_action_payload(view.kind, rec, payload)
+                fields.update({name: values[name] for name in
+                               ("product_id", "qty", "unit_price", "total_amount", "currency")})
+            updated = self._put_record(actor.actor_id, rec.ref.record_type, rec.ref.record_id,
+                                        fields, bump_version_from=rec.ref.version)
+            if view.kind == C.ACTION_SALES_ORDER_REQUEST_CHANGE:
+                self._sync_document_line(actor, updated)
+            if spec.side_effects is not None:
+                spec.side_effects(self, actor, updated, payload,
+                                  rec.ref if spec.creates_child is not None else None)
+            if spec.resume_side_effects is not None:
+                spec.resume_side_effects(self, actor, updated, payload)
+            self._audit(actor.actor_id, view.kind, rec.ref, detail="审批通过，动作生效")
+        else:
+            handler = get_standalone_handler(view.kind)
+            if handler is None:
+                raise E.ValidationFailed("approval has no supported resume handler")
             handler(self, actor, view, payload)
+
+    def _apply_rejection(self, view: ApprovalView) -> None:
+        rec, _, actor = self._decision_binding(view, "rejected")
+        if view.kind in BUSINESS_ACTION_SPECS:
+            spec = get_action(view.kind)
+            state = spec.child_rejected_state if spec.creates_child is not None else spec.rejected_state
+            if state:
+                fields = dict(rec.fields)
+                fields["state"] = state
+                self._put_record(actor.actor_id, rec.ref.record_type, rec.ref.record_id,
+                                 fields, bump_version_from=rec.ref.version)
 
     def approve(self, actor: Principal, approval_id: str, *, comment: str = "") -> ApprovalView:
         with self._lock:
@@ -830,33 +1591,7 @@ class PublicSimulatedBackend:
 
     def reject(self, actor: Principal, approval_id: str, *, comment: str = "") -> ApprovalView:
         with self._lock:
-            view = self._decide(actor, approval_id, approve=False, comment=comment)
-            # A rejected action returns its target to the pre-gate state when
-            # the gate was in-place (the record currently shows the pending
-            # state). For child-record gates the child stays visibly failed.
-            row = self._get_row(view.target.record_type, view.target.record_id)
-            if row is not None:
-                from .actions import get_action
-                if view.kind in BUSINESS_ACTION_SPECS:
-                    spec = get_action(view.kind)
-                    if spec.creates_child is None and spec.rejected_state:
-                        fields = json.loads(row["fields"])
-                        fields["state"] = spec.rejected_state
-                        self._put_record(
-                            view.decided_by or "system", view.target.record_type,
-                            view.target.record_id, fields,
-                            bump_version_from=int(row["version"]),
-                        )
-                    elif spec.creates_child is not None and spec.child_rejected_state:
-                        fields = json.loads(row["fields"])
-                        fields["state"] = spec.child_rejected_state
-                        self._put_record(
-                            view.decided_by or "system", view.target.record_type,
-                            view.target.record_id, fields,
-                            bump_version_from=int(row["version"]),
-                        )
-                    self._db.commit()
-            return view
+            return self._decide(actor, approval_id, approve=False, comment=comment)
 
     # --------------------------------------------------- governed actions
     def submit_governed_action(
@@ -1121,7 +1856,7 @@ class PublicSimulatedBackend:
                 body=f"{actor.display_name} 指派任务「{title}」",
                 priority=C.PRIORITY_NORMAL, related=related,
             )
-            self._db.commit()
+            self._commit_business()
             row = self._db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             return self._task_view(row)
 
@@ -1138,7 +1873,7 @@ class PublicSimulatedBackend:
             )
             self._audit(actor.actor_id, "task.complete", RecordRef("task", task_id),
                         detail=note)
-            self._db.commit()
+            self._commit_business()
             return self._task_view(
                 self._db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             )
@@ -1258,7 +1993,7 @@ class PublicSimulatedBackend:
                                 " VALUES (?,?,?,?)",
                                 (target_id, f"[模拟邮件] {title}", body, now),
                             )
-            self._db.commit()
+            self._commit_business()
 
     def list_notifications(
         self, actor: Principal, *, unread_only: bool = False
@@ -1464,10 +2199,15 @@ def _eval_condition(condition: Mapping[str, Any], payload: Mapping[str, Any]) ->
     actual = payload.get(field)
     if actual is None:
         return False
-    try:
-        a, b = float(actual), float(target)
-    except (TypeError, ValueError):
-        a, b = str(actual), str(target)
+    if isinstance(actual, bool) or isinstance(target, bool):
+        a, b = actual, target
+    else:
+        try:
+            a, b = F.number(actual, field), F.number(target, "policy threshold")
+        except E.ValidationFailed:
+            if op not in ("==", "!="):
+                raise E.ValidationFailed("policy comparison requires finite numeric inputs") from None
+            a, b = str(actual), str(target)
     return {
         ">": a > b, ">=": a >= b, "<": a < b, "<=": a <= b,
         "==": a == b, "!=": a != b,

@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 from framework_port import constants as C
 from framework_port import errors as E
 from framework_port.dtos import ApprovalView, Principal, Record, RecordRef
+from . import financial as F
 
 
 @dataclass
@@ -67,15 +68,16 @@ def _move_inventory(
 ) -> Record:
     """Apply one inventory movement with conservation checks (demo semantics)."""
 
-    qty = float(item.fields.get("qty_on_hand", 0))
+    qty = F.number(item.fields.get("qty_on_hand"), "qty_on_hand")
+    delta = F.quantity(delta, "inventory delta", signed=True)
     new_qty = qty + delta
-    if new_qty < 0:
+    if qty < 0 or new_qty < 0:
         raise E.ValidationFailed(
             f"库存不足：{item.fields.get('name_cn', item.ref.record_id)} 现有 {qty:g}，"
             f"需要 {-delta:g}"
         )
     fields = dict(item.fields)
-    fields["qty_on_hand"] = new_qty
+    fields["qty_on_hand"] = F.json_number(new_qty)
     engine._put_record(
         actor.actor_id, item.ref.record_type, item.ref.record_id, fields,
         bump_version_from=item.ref.version,
@@ -83,10 +85,10 @@ def _move_inventory(
     movement_fields = {
         "item_type": item.ref.record_type,
         "item_id": item.ref.record_id,
-        "delta": delta,
+        "delta": F.json_number(delta),
         "movement_type": movement_type,
         "note": note,
-        "qty_after": new_qty,
+        "qty_after": F.json_number(new_qty),
     }
     movement_id = engine._next_id(C.RECORD_INVENTORY_MOVEMENT)
     engine._put_record(
@@ -120,6 +122,7 @@ def _create_sales_order_from_quote(
         "product_id": quote.fields.get("product_id", ""),
         "product_name": quote.fields.get("product_name", ""),
         "qty": quote.fields.get("qty", 0),
+        "unit_price": quote.fields["unit_price"],
         "total_amount": quote.fields.get("total_amount", 0),
         "currency": quote.fields.get("currency", "CNY"),
         "requested_date": quote.fields.get("requested_date", ""),
@@ -145,8 +148,9 @@ def _create_sales_order_from_quote(
 
 
 def _create_production_order(
-    engine, actor: Principal, order: Record, payload: Mapping[str, Any]
+    engine, actor: Principal, order: Record, payload: Mapping[str, Any], *, record_id=None
 ) -> Record:
+    policy_data = engine._validated_action_payload(C.ACTION_PRODUCTION_ORDER_CREATE, order, payload)
     fields = {
         "order_id": order.ref.record_id,
         "product_id": payload.get("product_id", ""),
@@ -159,7 +163,13 @@ def _create_production_order(
         "state": "planned",
         "owner_id": actor.actor_id,
     }
-    po_id = engine._next_id(C.RECORD_PRODUCTION_ORDER)
+    fields["_production_binding"] = {
+        "parent": engine._record_binding(order),
+        "content": {k: fields[k] for k in
+                    ("product_id", "qty", "expedite", "substitute")},
+        "policy_data": dict(policy_data),
+    }
+    po_id = record_id or engine._next_id(C.RECORD_PRODUCTION_ORDER)
     po = engine._put_record(actor.actor_id, C.RECORD_PRODUCTION_ORDER, po_id, fields)
     for req in payload.get("requirements", []):
         req_fields = {
@@ -192,19 +202,18 @@ def _create_shipment(
 
 # ------------------------------------------------------------ side effects
 def _after_release(engine, actor: Principal, po: Record, payload, child_ref) -> str:
+    engine._advance_production_parent(actor, po, C.ACTION_PRODUCTION_ORDER_RELEASE, "in_production")
     engine.create_task(
         actor, "material_issue",
         f"领料：{po.fields.get('product_name', '')} × {po.fields.get('qty', 0):g}",
         "warehouse", related=po.ref, origin="system",
         note="生产工单已下达，请按物料需求领料",
     )
-    order_id = str(po.fields.get("order_id", ""))
-    if order_id:
-        _set_order_state(engine, actor, order_id, "in_production")
     return "已通知仓库领料"
 
 
 def _after_complete(engine, actor: Principal, po: Record, payload, child_ref) -> str:
+    engine._advance_production_parent(actor, po, C.ACTION_PRODUCTION_ORDER_COMPLETE, "ready_to_ship")
     engine.create_task(
         actor, "fg_receipt",
         f"成品入库：{po.fields.get('product_name', '')} × {po.fields.get('qty', 0):g}",
@@ -213,7 +222,6 @@ def _after_complete(engine, actor: Principal, po: Record, payload, child_ref) ->
     )
     order_id = str(po.fields.get("order_id", ""))
     if order_id:
-        _set_order_state(engine, actor, order_id, "ready_to_ship")
         engine.notify(
             actor, "production.completed", ("sales", "owner"),
             title=f"生产完成 {po.ref.record_id}",
@@ -222,18 +230,6 @@ def _after_complete(engine, actor: Principal, po: Record, payload, child_ref) ->
             priority=C.PRIORITY_NORMAL, related=po.ref,
         )
     return "已通知销售与老板，订单可发货"
-
-
-def _set_order_state(engine, actor: Principal, order_id: str, state: str) -> None:
-    row = engine._get_row(C.RECORD_SALES_ORDER, order_id)
-    if row is None:
-        return
-    fields = dict(engine._row_to_record(row).fields)
-    fields["state"] = state
-    engine._put_record(
-        actor.actor_id, C.RECORD_SALES_ORDER, order_id, fields,
-        bump_version_from=int(row["version"]),
-    )
 
 
 def _after_issue(engine, actor: Principal, po: Record, payload, child_ref) -> str:
@@ -273,7 +269,7 @@ def _receipt_side_effects(engine, actor: Principal, item: Record, payload, child
 
 
 def _adjust_side_effects(engine, actor: Principal, item: Record, payload, child_ref) -> str:
-    delta = float(payload.get("adjust_qty", 0))
+    delta = F.quantity(payload.get("adjust_qty"), "adjust_qty", signed=True)
     if delta:
         _move_inventory(engine, actor, item, delta, "adjust",
                         str(payload.get("justification", "盘点调整")))

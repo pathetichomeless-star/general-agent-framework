@@ -204,8 +204,8 @@ class DemoApp:
                 b, ctx.actor,
                 customer_name=form.get("customer_name", ""),
                 product_id=form.get("product_id", ""),
-                qty=_float(form.get("qty", "0")),
-                discount_pct=_float(form.get("discount_pct", "0")),
+                qty=form.get("qty", ""),
+                discount_pct=form.get("discount_pct", ""),
                 requested_date=form.get("requested_date", ""),
             )
             return views.page_quotation_new(ctx, draft)
@@ -214,11 +214,11 @@ class DemoApp:
                 "customer_name": form.get("customer_name", ""),
                 "product_id": form.get("product_id", ""),
                 "product_name": form.get("product_name", ""),
-                "qty": _float(form.get("qty", "0")),
-                "list_price": _float(form.get("list_price", "0")),
-                "discount_pct": _float(form.get("discount_pct", "0")),
-                "unit_price": _float(form.get("unit_price", "0")),
-                "total_amount": _float(form.get("total_amount", "0")),
+                "qty": form.get("qty", "0"),
+                "list_price": form.get("list_price", "0"),
+                "discount_pct": form.get("discount_pct", "0"),
+                "unit_price": form.get("unit_price", "0"),
+                "total_amount": form.get("total_amount", "0"),
                 "currency": "CNY",
                 "requested_date": form.get("requested_date", ""),
                 "state": "draft",
@@ -227,8 +227,8 @@ class DemoApp:
                 "quotation_id": rec.ref.record_id,
                 "product_id": form.get("product_id", ""),
                 "product_name": form.get("product_name", ""),
-                "qty": _float(form.get("qty", "0")),
-                "unit_price": _float(form.get("unit_price", "0")),
+                "qty": rec.fields["qty"],
+                "unit_price": rec.fields["unit_price"],
             })
             return ctx.redirect(views.flash_link(
                 f"/quotations/{rec.ref.record_id}", lang, ctx.t("created")))
@@ -240,12 +240,13 @@ class DemoApp:
             qid, action = match.group(1), match.group(2)
             action_id = (C.ACTION_QUOTATION_SUBMIT if action == "submit"
                          else C.ACTION_QUOTATION_ACCEPT)
+            if set(form) - {"lang", "justification", "discount_pct"}:
+                raise FE.ValidationFailed("quotation action cannot override business fields")
             payload: dict[str, Any] = {"justification": form.get("justification", "")}
-            if form.get("discount_pct"):
-                payload["discount_pct"] = _float(form.get("discount_pct"))
-            # NOTE: the discount used by the approval policy comes from the
-            # quotation record unless explicitly resubmitted here — the form
-            # deliberately cannot downgrade a negotiated discount.
+            if "discount_pct" in form:
+                # Preserve the raw value: the backend validates it against the
+                # stored quotation; invalid input must never become zero.
+                payload["discount_pct"] = form["discount_pct"]
             result = b.execute_business_action(
                 ctx.actor, RecordRef(C.RECORD_QUOTATION, qid), action_id, payload,
             )
@@ -363,20 +364,20 @@ class DemoApp:
                          priority=C.PRIORITY_NORMAL, related=ref)
                 return ctx.redirect(views.flash_link(f"/production/{pid}", lang,
                                                      f"交期调整为 {new_due}"))
-            result = b.execute_business_action(ctx.actor, ref, action_id, {
+            payload = {
                 "progress_pct": _float(form.get("progress_pct", "0")),
-            })
+            } if action == "progress" else {}
+            result = b.execute_business_action(ctx.actor, ref, action_id, payload)
             return ctx.redirect(views.flash_link(f"/production/{pid}", lang,
                                                  result.note or i18n.state_label(lang, result.state)))
         match = re.fullmatch(r"/inventory/([A-Za-z0-9_\-]+)/(receipt|adjust)", path)
         if match and method == "POST":
             iid, action = match.group(1), match.group(2)
             payload = (
-                {"qty": _float(form.get("qty", "0"))}
+                {"qty": form.get("qty", "")}
                 if action == "receipt"
-                else {"adjust_qty": _float(form.get("adjust_qty", "0")),
-                      "adjust_amount": _float(form.get("adjust_amount", "0")),
-                      "adjust_pct": _float(form.get("adjust_pct", "0"))}
+                else {key: form[key] for key in ("adjust_qty", "adjust_amount", "adjust_pct", "justification")
+                      if key in form}
             )
             action_id = (C.ACTION_INVENTORY_RECEIPT if action == "receipt"
                          else C.ACTION_INVENTORY_ADJUST)

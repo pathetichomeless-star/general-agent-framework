@@ -706,8 +706,7 @@ def page_inventory(ctx: Ctx) -> str:
             adjust = (
                 f"<form method='post' action='/inventory/{esc(it.ref.record_id)}/adjust'"
                 f" class='inline'><input name='adjust_qty' type='number' step='1' value='0'"
-                f" style='width:80px'><input type='hidden' name='adjust_amount' value='0'>"
-                f"<input type='hidden' name='adjust_pct' value='0'>"
+                f" style='width:80px'>"
                 f"<button class='btn gray sm' type='submit'>{ctx.t('act_adjust')}</button></form>"
                 f" <form method='post' action='/inventory/{esc(it.ref.record_id)}/receipt'"
                 f" class='inline'><input name='qty' type='number' step='1' value='10'"

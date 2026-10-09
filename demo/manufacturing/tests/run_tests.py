@@ -14,6 +14,9 @@ sys.path.insert(0, str(HERE))
 
 import test_boundary  # noqa: E402,F401
 import test_contract  # noqa: E402
+import test_approval_integrity  # noqa: E402
+import test_business_integrity  # noqa: E402
+import test_cross_object_integrity  # noqa: E402
 
 
 def main() -> int:
@@ -21,6 +24,9 @@ def main() -> int:
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromModule(test_boundary))
     suite.addTests(loader.loadTestsFromModule(test_contract))
+    suite.addTests(loader.loadTestsFromModule(test_approval_integrity))
+    suite.addTests(loader.loadTestsFromModule(test_business_integrity))
+    suite.addTests(loader.loadTestsFromModule(test_cross_object_integrity))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     return 0 if result.wasSuccessful() else 1

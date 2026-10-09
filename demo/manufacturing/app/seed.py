@@ -119,6 +119,21 @@ INVENTORY: tuple[dict, ...] = (  # item_ref = material/product id
 
 
 def seed(backend) -> dict:
+    """Load fixtures through an optional, trusted backend initialization hook.
+
+    This hook is separate from the business Facade. Unsupported backends fail
+    closed; initialization never changes the caller's authorization policy.
+    """
+    from framework_port.errors import NotSupportedInBackend
+    from . import policy
+
+    initialize = getattr(backend, "_initialize_demo_seed", None)
+    if not callable(initialize):
+        raise NotSupportedInBackend("backend does not support trusted demo initialization")
+    return initialize(_seed, policy._RULES, policy.APPROVAL_POLICIES, policy.APPROVER_ROLES)
+
+
+def _seed(backend) -> dict:
     """Populate an empty backend with the deterministic demo scenario."""
 
     if backend.list_records(OWNER, C.RECORD_CUSTOMER):
